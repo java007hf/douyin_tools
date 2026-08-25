@@ -1,0 +1,7 @@
+cache/
+__pycache__/
+*.py[cod]
+.douyin-browser/
+downloads/
+downloads_test*/
+urls.txt
