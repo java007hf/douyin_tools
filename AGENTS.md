@@ -4,12 +4,12 @@
 
 Keep the repository root clean. The root should contain source code, committed utilities, extension source, and documentation only:
 
-- `douyin_work_urls.py`
 - `analyze_extension_result.py`
 - `requirements.txt`
 - `README.md`
 - `AGENTS.md`
-- `chrome_extension/`
+- `frontend/`
+- `services/`
 
 ## Cache And Test Artifacts
 
@@ -18,10 +18,10 @@ Put all local test files, temporary browser profiles, downloaded media, scratch 
 Examples:
 
 ```powershell
-python douyin_work_urls.py "主页地址" -o cache\urls.txt
-python douyin_work_urls.py --download "作品地址" --download-dir cache\downloads
-python douyin_work_urls.py "主页地址" --user-data-dir cache\.douyin-browser -o cache\urls.txt
-python douyin_work_urls.py --extension-interact "作品地址" --like > cache\extension_result.json
+python services\douyin\service.py "主页地址" -o cache\urls.txt
+python services\douyin\service.py --download "作品地址" --download-dir cache\downloads
+python services\douyin\service.py "主页地址" --user-data-dir cache\.douyin-browser -o cache\urls.txt
+python services\douyin\service.py --extension-interact "作品地址" --like > cache\extension_result.json
 ```
 
 Do not create `downloads_test*`, `urls.txt`, `extension_result.json`, `__pycache__`, or browser profile folders in the project root.
@@ -32,15 +32,15 @@ For comment, like, and favorite features, avoid bulk execution during tests. Use
 
 Prefer `--extension-interact` for real interaction tests. It uses the installed Chrome extension and the logged-in Douyin page context. The older `--api-interact` path is useful for diagnostics but is less stable because Douyin may require page runtime parameters such as `msToken`, `a_bogus`, and `verifyFp`.
 
-Current verified Chrome extension version: `0.4.0`.
+The Chrome extension version is defined only in `services/douyin/chrome_extension/manifest.json`; Python and JavaScript read it at runtime.
 
 When changing extension bridge behavior, update all matching version references together:
 
-- `chrome_extension/manifest.json`
-- `chrome_extension/background.js`
-- `chrome_extension/content.js`
-- `chrome_extension/injected.js`
-- `douyin_work_urls.py` expected extension version warning
+- `services/douyin/chrome_extension/manifest.json`
+- `services/douyin/chrome_extension/background.js`
+- `services/douyin/chrome_extension/content.js`
+- `services/douyin/chrome_extension/injected.js`
+- `services/douyin/service.py` expected extension version warning
 - `README.md`
 
 The currently verified interaction endpoints are:
@@ -58,11 +58,11 @@ Do not switch favorite back to `/aweme/v1/web/aweme/favorite/`; that endpoint ca
 Run syntax checks before committing code changes:
 
 ```powershell
-python -m py_compile douyin_work_urls.py analyze_extension_result.py
-node --check chrome_extension\background.js
-node --check chrome_extension\content.js
-node --check chrome_extension\injected.js
-node --check chrome_extension\popup.js
+python -m py_compile services\douyin\service.py services\video_creator\service.py web_app.py analyze_extension_result.py
+node --check services\douyin\chrome_extension\background.js
+node --check services\douyin\chrome_extension\content.js
+node --check services\douyin\chrome_extension\injected.js
+node --check services\douyin\chrome_extension\popup.js
 ```
 
 If Python creates `__pycache__`, remove it before committing. `cache/` must remain ignored and uncommitted.

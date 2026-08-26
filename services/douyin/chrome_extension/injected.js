@@ -1,5 +1,5 @@
 (function () {
-  const VERSION = "0.4.0";
+  const VERSION = window.__douyinToolsExtensionVersion || "unknown";
   if (window.__douyinToolsVersion === VERSION) return;
   window.__douyinToolsInjected = true;
   window.__douyinToolsVersion = VERSION;
@@ -666,6 +666,26 @@
     let unchanged = 0;
     let lastCount = profileItemsResult().length;
 
+    function reportProgress(scroll) {
+      const items = profileItemsResult();
+      window.postMessage({
+        id: options.requestId,
+        source: "douyin-tools-page",
+        progress: true,
+        data: {
+          version: VERSION,
+          scroll,
+          maxScrolls,
+          targetCount,
+          items,
+          capturedPages: state.profileResponses.length,
+          count: items.length
+        }
+      }, "*");
+    }
+
+    reportProgress(0);
+
     if (targetCount && lastCount >= targetCount) {
       return {
         version: VERSION,
@@ -682,6 +702,7 @@
       await new Promise((resolve) => setTimeout(resolve, waitMs));
 
       const count = profileItemsResult().length;
+      reportProgress(index + 1);
       if (targetCount && count >= targetCount) break;
       if (count === lastCount) {
         unchanged += 1;

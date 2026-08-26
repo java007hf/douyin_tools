@@ -20,31 +20,31 @@ python -m playwright install chromium
 基础用法：
 
 ```powershell
-python douyin_work_urls.py "主页地址" -o cache\urls.txt
+python services/douyin/service.py "主页地址" -o cache\urls.txt
 ```
 
 示例：
 
 ```powershell
-python douyin_work_urls.py "https://www.douyin.com/user/MS4wLjABAAAApzZePR1kYLd7RXrQvyj5kKJvuK7XvEw-oeNe-ahH5PI?from_tab_name=main&relation=0&vid=7652265576731359337" -o cache\urls.txt
+python services/douyin/service.py "https://www.douyin.com/user/MS4wLjABAAAApzZePR1kYLd7RXrQvyj5kKJvuK7XvEw-oeNe-ahH5PI?from_tab_name=main&relation=0&vid=7652265576731359337" -o cache\urls.txt
 ```
 
 作品很多时，加大分页滚动次数和等待时间：
 
 ```powershell
-python douyin_work_urls.py "https://www.douyin.com/user/MS4wLjABAAAAWtdddV646SZLHVCxRm6DZjHbMX2dgAiyqVhiAYMDUm8?from_tab_name=main&vid=7677547779459179242" --max-scrolls 1000 --idle-rounds 30 --wait 2 -o cache\urls.txt
+python services/douyin/service.py "https://www.douyin.com/user/MS4wLjABAAAAWtdddV646SZLHVCxRm6DZjHbMX2dgAiyqVhiAYMDUm8?from_tab_name=main&vid=7677547779459179242" --max-scrolls 1000 --idle-rounds 30 --wait 2 -o cache\urls.txt
 ```
 
 如果知道大概作品数，可以用 `--target-count` 达到数量后自动停止：
 
 ```powershell
-python douyin_work_urls.py "主页地址" --target-count 300 -o cache\urls.txt
+python services/douyin/service.py "主页地址" --target-count 300 -o cache\urls.txt
 ```
 
 遇到登录、验证码或空结果，用可见浏览器模式：
 
 ```powershell
-python douyin_work_urls.py "主页地址" --headful --user-data-dir cache\.douyin-browser -o cache\urls.txt
+python services/douyin/service.py "主页地址" --headful --user-data-dir cache\.douyin-browser -o cache\urls.txt
 ```
 
 ## 下载单个作品
@@ -52,31 +52,31 @@ python douyin_work_urls.py "主页地址" --headful --user-data-dir cache\.douyi
 下载标准视频地址：
 
 ```powershell
-python douyin_work_urls.py --download "https://www.douyin.com/video/7577345577656035574" --download-dir cache\downloads
+python services/douyin/service.py --download "https://www.douyin.com/video/7577345577656035574" --download-dir cache\downloads
 ```
 
 下载标准图文或 note 地址：
 
 ```powershell
-python douyin_work_urls.py --download "https://www.douyin.com/note/7657685355588900179" --download-dir cache\downloads
+python services/douyin/service.py --download "https://www.douyin.com/note/7657685355588900179" --download-dir cache\downloads
 ```
 
 下载主页弹窗地址也支持，会优先读取 URL 里的 `modal_id`，没有 `modal_id` 时读取 `vid`：
 
 ```powershell
-python douyin_work_urls.py --download "https://www.douyin.com/user/MS4wLjABAAAAWtdddV646SZLHVCxRm6DZjHbMX2dgAiyqVhiAYMDUm8?from_tab_name=main&modal_id=7577345577656035574&vid=7677547779459179242" --download-dir cache\downloads
+python services/douyin/service.py --download "https://www.douyin.com/user/MS4wLjABAAAAWtdddV646SZLHVCxRm6DZjHbMX2dgAiyqVhiAYMDUm8?from_tab_name=main&modal_id=7577345577656035574&vid=7677547779459179242" --download-dir cache\downloads
 ```
 
 如果主页弹窗链接下载不稳定，可以把 `modal_id` 改成标准作品地址再下载：
 
 ```powershell
-python douyin_work_urls.py --download "https://www.douyin.com/video/7577345577656035574" --download-dir cache\downloads
+python services/douyin/service.py --download "https://www.douyin.com/video/7577345577656035574" --download-dir cache\downloads
 ```
 
 下载全部候选媒体：
 
 ```powershell
-python douyin_work_urls.py --download "作品地址" --download-dir cache\downloads --all-media
+python services/douyin/service.py --download "作品地址" --download-dir cache\downloads --all-media
 ```
 
 下载实现原理：脚本先通过 Playwright 打开页面并监听抖音 Web 接口，从接口返回的作品结构里提取 `video.play_addr`、`play_addr_h264`、`images` 等媒体 URL，然后再用 HTTP 把这些播放流或图片地址保存到本地。它不是调用“下载按钮”，所以作品是否允许前端下载按钮可用，不一定等同于脚本能否拿到播放流；但如果抖音风控、登录状态、签名或临时播放地址失效，下载仍然会失败。
@@ -91,25 +91,25 @@ python douyin_work_urls.py --download "作品地址" --download-dir cache\downlo
 2. 进入 `chrome://extensions/`。
 3. 打开“开发者模式”。
 4. 点击“加载已解压的扩展程序”。
-5. 选择本项目的 `chrome_extension` 目录。
-6. 确认扩展版本是 `0.4.0`；代码更新后需要在扩展页点击“重新加载”。
+5. 选择本项目的 `services/douyin/chrome_extension` 目录。
+6. 确认扩展版本与 `services/douyin/chrome_extension/manifest.json` 中的 `version` 一致；代码更新后需要在扩展页点击“重新加载”。
 
 执行评论、点赞、收藏：
 
 ```powershell
-python douyin_work_urls.py --extension-interact "作品地址" --comment "我也来一台" --like --favorite
+python services/douyin/service.py --extension-interact "作品地址" --comment "我也来一台" --like --favorite
 ```
 
 支持带 `modal_id` 的主页弹窗地址：
 
 ```powershell
-python douyin_work_urls.py --extension-interact "https://www.douyin.com/user/MS4wLjABAAAAe1U5r2VogLrabUBs8ebistBpRd4naDk_4GuPbE1ozgOLt6obzQ8lgTOn4hvs6ZUH?modal_id=7208412974606798138" --comment "xuedaole" --like --favorite
+python services/douyin/service.py --extension-interact "https://www.douyin.com/user/MS4wLjABAAAAe1U5r2VogLrabUBs8ebistBpRd4naDk_4GuPbE1ozgOLt6obzQ8lgTOn4hvs6ZUH?modal_id=7208412974606798138" --comment "xuedaole" --like --favorite
 ```
 
 导出结果到日志文件：
 
 ```powershell
-python douyin_work_urls.py --extension-interact "作品地址" --comment "xuedaole" --like --favorite > cache\extension_result.json
+python services/douyin/service.py --extension-interact "作品地址" --comment "xuedaole" --like --favorite > cache\extension_result.json
 ```
 
 PowerShell 重定向出来的 JSON 可能是 UTF-16，使用项目里的分析脚本查看结果：
@@ -121,7 +121,7 @@ python analyze_extension_result.py cache\extension_result.json
 成功结果应重点看这些字段：
 
 ```text
-version: 0.4.0
+version: 以 `services/douyin/chrome_extension/manifest.json` 为准
 readiness.reason: captured-comment-list
 ACTION like     success: true
 ACTION favorite success: true
@@ -144,30 +144,30 @@ ACTION comment  success: true，并且 comment_id 不为空
 评论: /aweme/v1/web/comment/publish/
 ```
 
-注意：旧的 `/aweme/v1/web/aweme/favorite/` 在当前页面里可能返回收藏列表，不是可靠的收藏动作接口；扩展版本 `0.4.0` 已改用 `collect`。
+注意：旧的 `/aweme/v1/web/aweme/favorite/` 在当前页面里可能返回收藏列表，不是可靠的收藏动作接口；扩展版本以 manifest 为准，已改用 `collect`。
 
 ## 其他互动方式
 
 页面自动化模式会用 Playwright 打开浏览器并点击页面按钮：
 
 ```powershell
-python douyin_work_urls.py --interact "作品地址" --comment "评论内容" --like --favorite --headful --user-data-dir cache\.douyin-browser
+python services/douyin/service.py --interact "作品地址" --comment "评论内容" --like --favorite --headful --user-data-dir cache\.douyin-browser
 ```
 
 直接接口模式会复用浏览器 cookie 组装 Web API 请求，但容易缺少抖音页面运行时生成的签名参数：
 
 ```powershell
-python douyin_work_urls.py --api-interact "作品地址" --comment "评论内容" --like --favorite --user-data-dir cache\.douyin-browser
+python services/douyin/service.py --api-interact "作品地址" --comment "评论内容" --like --favorite --user-data-dir cache\.douyin-browser
 ```
 
 一般优先使用 `--extension-interact`。
 
 ## 网站部署
 
-启动本地网站：
+启动统一前端和全部 Tab 服务：
 
 ```powershell
-python douyin_work_urls.py --web --web-host 0.0.0.0 --web-port 8003
+python web_app.py --host 0.0.0.0 --port 8003 --service-host 0.0.0.0
 ```
 
 访问方打开：
@@ -176,16 +176,30 @@ python douyin_work_urls.py --web --web-host 0.0.0.0 --web-port 8003
 http://服务器IP:8003
 ```
 
-当前网站里的单作品下载仍由服务器上的 Python/Playwright 完成；博主主页列表拉取改用服务器 Chrome 扩展桥接完成。也就是说，如果部署到一台服务器并统一使用服务器上的抖音登录态：
+网站由一个统一前端和多个独立 Tab 服务组成：
+
+- `web_app.py`：统一前端和 Tab 注册入口，默认端口 `8003`。
+- `services/douyin/service.py`：抖音工具服务，默认端口 `8101`。
+- `services/video_creator/service.py`：视频创作服务，默认端口 `8102`，当前提供输入和任务契约占位页面。
+
+每个 Tab 都有独立端口，可以单独启动、替换或部署；统一前端通过 `services/core/registry.py` 读取 Tab 配置。服务器部署时：
 
 - 服务器需要安装 Chrome。
-- 服务器 Chrome 需要加载本项目的 `chrome_extension/` 扩展，并保持版本为 `0.4.0`。
+- 服务器 Chrome 需要加载本项目的 `services/douyin/chrome_extension/` 扩展，并保持 manifest 中的版本与服务一致。
 - 服务器 Chrome 需要保持可用的抖音登录态；如果遇到验证码或风控，需要在服务器 Chrome 上处理。
 - 用户侧只需要打开 `http://服务器IP:8003`，不需要安装 Chrome 扩展。
 
 网页端采集只需要填写“目标数量”。滚动次数和等待时间由服务端自动控制，达到目标数量后立即停止；不填写目标数量时使用默认滚动上限继续采集。命令行模式仍保留 `--max-scrolls`、`--wait` 等参数供高级场景使用。
 
 如果希望每个用户使用自己的抖音账号和自己的浏览器上下文，则扩展需要安装在用户自己的 Chrome 里。
+
+也可以分别启动 Tab 服务：
+
+```powershell
+python services/douyin/service.py --web --web-host 0.0.0.0 --web-port 8101 --cache-dir cache\douyin
+python services/video_creator/service.py --host 0.0.0.0 --port 8102
+python web_app.py --host 0.0.0.0 --port 8003 --no-start-services
+```
 
 ## 常用参数
 

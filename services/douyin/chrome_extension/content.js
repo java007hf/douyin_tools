@@ -1,7 +1,8 @@
 function douyinToolsContentMain() {
-  const CONTENT_VERSION = "0.4.0";
+  const CONTENT_VERSION = chrome.runtime.getManifest().version;
 
   function injectPageScript() {
+    window.__douyinToolsExtensionVersion = CONTENT_VERSION;
     const parent = document.documentElement || document.head || document.body;
     if (!parent) {
       setTimeout(injectPageScript, 50);
@@ -28,6 +29,14 @@ function douyinToolsContentMain() {
     if (event.source !== window) return;
     const message = event.data;
     if (!message || message.source !== "douyin-tools-page") return;
+
+    if (message.progress) {
+      chrome.runtime.sendMessage({
+        source: "douyin-tools-progress-v3",
+        data: message.data || {}
+      }).catch(() => {});
+      return;
+    }
 
     if (message.id && pending.has(message.id)) {
       pending.get(message.id)(message);

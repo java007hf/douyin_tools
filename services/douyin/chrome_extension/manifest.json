@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Douyin Tools Helper",
-  "version": "0.4.0",
+  "version": "0.4.4",
   "description": "Bridge local Python commands to the logged-in Douyin browser session.",
   "permissions": ["activeTab", "scripting", "clipboardWrite", "tabs", "alarms"],
   "host_permissions": [

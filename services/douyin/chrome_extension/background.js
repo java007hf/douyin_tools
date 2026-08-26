@@ -1,6 +1,7 @@
 const BRIDGE_BASE = "http://127.0.0.1:18765";
-const EXTENSION_VERSION = "0.4.0";
+const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 let busy = false;
+let activeCommandId = null;
 
 async function bridgeFetch(path, options = {}) {
   try {
@@ -32,6 +33,14 @@ async function reportResult(payload) {
   }
 }
 
+async function reportProgress(data) {
+  if (!activeCommandId) return;
+  await bridgeFetch("/progress", {
+    method: "POST",
+    body: JSON.stringify({ id: activeCommandId, data })
+  });
+}
+
 async function findDouyinTab() {
   const tabs = await chrome.tabs.query({ url: "https://www.douyin.com/*" });
   if (!tabs.length) throw new Error("No open douyin.com tab found");
@@ -49,43 +58,58 @@ async function waitForTabLoaded(tabId, timeoutMs = 30000) {
   return chrome.tabs.get(tabId);
 }
 
-async function sendToContent(tabId, command) {
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    files: ["content.js"]
-  });
-
-  try {
-    return await chrome.tabs.sendMessage(tabId, {
-      source: "douyin-tools-background-v3",
-      action: command.action || "interactV3",
-      url: command.url,
-      profileUrl: command.profileUrl,
-      workId: command.workId,
-      comment: command.comment || "",
-      like: Boolean(command.like),
-      favorite: Boolean(command.favorite),
-      maxScrolls: command.maxScrolls,
-      targetCount: command.targetCount,
-      waitMs: command.waitMs,
-      timeoutMs: command.timeoutMs
-    });
-  } catch (error) {
-    return chrome.tabs.sendMessage(tabId, {
-      source: "douyin-tools-background-v3",
-      action: command.action || "interactV3",
-      url: command.url,
-      profileUrl: command.profileUrl,
-      workId: command.workId,
-      comment: command.comment || "",
-      like: Boolean(command.like),
-      favorite: Boolean(command.favorite),
-      maxScrolls: command.maxScrolls,
-      targetCount: command.targetCount,
-      waitMs: command.waitMs,
-      timeoutMs: command.timeoutMs
-    });
+async function openCommandTab(command) {
+  let lastError;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const tab = await chrome.tabs.create({ url: command.openUrl || command.url, active: true });
+      await waitForTabLoaded(tab.id);
+      await new Promise((resolve) => setTimeout(resolve, 8000));
+      return tab;
+    } catch (error) {
+      lastError = error;
+      if (!String(error && error.message || error).includes("No tab with id") || attempt === 1) {
+        throw error;
+      }
+    }
   }
+  throw lastError;
+}
+
+async function sendToContent(tabId, command) {
+  const message = {
+      source: "douyin-tools-background-v3",
+      action: command.action || "interactV3",
+      requestId: command.id,
+      url: command.url,
+      profileUrl: command.profileUrl,
+      workId: command.workId,
+      comment: command.comment || "",
+      like: Boolean(command.like),
+      favorite: Boolean(command.favorite),
+      maxScrolls: command.maxScrolls,
+      targetCount: command.targetCount,
+      waitMs: command.waitMs,
+      timeoutMs: command.timeoutMs
+  };
+
+  let lastError;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        files: ["content.js"]
+      });
+      await new Promise((resolve) => setTimeout(resolve, 500 + attempt * 500));
+      return await chrome.tabs.sendMessage(tabId, message);
+    } catch (error) {
+      lastError = error;
+      if (!String(error && error.message || error).includes("Receiving end does not exist")) {
+        throw error;
+      }
+    }
+  }
+  throw new Error(`Douyin page extension script was not ready after retries: ${lastError?.message || lastError}`);
 }
 
 async function pollOnce() {
@@ -101,18 +125,24 @@ async function pollOnce() {
 
   if (!command || !command.id) return;
   busy = true;
+  activeCommandId = command.id;
 
   try {
-    let tab;
-    if (command.openUrl || command.url) {
-      tab = await chrome.tabs.create({ url: command.openUrl || command.url, active: true });
-      await waitForTabLoaded(tab.id);
-      await new Promise((resolve) => setTimeout(resolve, 8000));
-    } else {
-      tab = await findDouyinTab();
+    let tab = (command.openUrl || command.url)
+      ? await openCommandTab(command)
+      : await findDouyinTab();
+    let result;
+    try {
+      result = await sendToContent(tab.id, command);
+    } catch (error) {
+      const message = String(error && error.message || error);
+      if (!/(No tab with id|Receiving end does not exist)/.test(message) || !(command.openUrl || command.url)) {
+        throw error;
+      }
+      console.warn(`Douyin Tools ${EXTENSION_VERSION}: tab disappeared, reopening once`);
+      tab = await openCommandTab(command);
+      result = await sendToContent(tab.id, command);
     }
-
-    const result = await sendToContent(tab.id, command);
     await reportResult({ id: command.id, ok: true, result });
   } catch (error) {
     console.error(`Douyin Tools ${EXTENSION_VERSION}: command failed`, error);
@@ -122,9 +152,15 @@ async function pollOnce() {
       error: String(error && error.message || error)
     });
   } finally {
+    activeCommandId = null;
     busy = false;
   }
 }
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (!message || message.source !== "douyin-tools-progress-v3") return;
+  reportProgress(message.data || {}).catch(() => {});
+});
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.alarms.create("douyin-tools-poll", { periodInMinutes: 1 });

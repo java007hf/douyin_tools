@@ -3,7 +3,7 @@
 Fetch work URLs from a Douyin creator homepage.
 
 Usage:
-  python douyin_work_urls.py "https://www.douyin.com/user/..." -o urls.txt
+  python services/douyin/service.py "https://www.douyin.com/user/..." -o cache/urls.txt
 
 First-time setup:
   pip install -r requirements.txt
@@ -33,7 +33,8 @@ from playwright.sync_api import sync_playwright
 
 
 NOTE_AWEME_TYPES = {68}
-EXPECTED_EXTENSION_VERSION = "0.4.0"
+EXTENSION_MANIFEST = Path(__file__).with_name("chrome_extension") / "manifest.json"
+EXPECTED_EXTENSION_VERSION = json.loads(EXTENSION_MANIFEST.read_text(encoding="utf-8"))["version"]
 
 
 @dataclass(frozen=True)
@@ -398,8 +399,12 @@ WEB_HTML = r"""<!doctype html>
       return body;
     }
 
-    async function waitJob(jobId, statusId, onUpdate) {
+    async function waitJob(jobId, statusId, onUpdate, timeoutMs = 10 * 60 * 1000) {
+      const startedAt = Date.now();
       for (;;) {
+        if (Date.now() - startedAt > timeoutMs) {
+          throw new Error("任务等待超时，请点击重试");
+        }
         const response = await fetch(`/api/jobs/${jobId}`);
         const job = await response.json();
         if (!response.ok) throw new Error(job.error || "任务不存在");
@@ -433,9 +438,19 @@ WEB_HTML = r"""<!doctype html>
       $("previewModal").classList.add("open");
     }
 
-    $("closePreview").addEventListener("click", () => $("previewModal").classList.remove("open"));
+    function closePreview() {
+      $("previewBody").querySelectorAll("video, audio").forEach((media) => {
+        media.pause();
+        media.removeAttribute("src");
+        media.load();
+      });
+      $("previewBody").replaceChildren();
+      $("previewModal").classList.remove("open");
+    }
+
+    $("closePreview").addEventListener("click", closePreview);
     $("previewModal").addEventListener("click", (event) => {
-      if (event.target === $("previewModal")) $("previewModal").classList.remove("open");
+      if (event.target === $("previewModal")) closePreview();
     });
 
     function normalizeItem(item) {
@@ -513,7 +528,7 @@ WEB_HTML = r"""<!doctype html>
             });
             const result = await waitJob(started.jobId, null, (_partial, job) => {
               files.textContent = job.message || "下载中";
-            });
+            }, 180000);
             downloadedByUrl.set(url, result.files || []);
             files.innerHTML = "";
             result.files.forEach((file) => {
@@ -528,7 +543,7 @@ WEB_HTML = r"""<!doctype html>
             button.disabled = false;
           } catch (error) {
             files.textContent = error.message;
-            button.textContent = "下载";
+            button.textContent = "重试下载";
             button.disabled = false;
           } finally {
             downloadingByUrl.delete(url);
@@ -540,6 +555,10 @@ WEB_HTML = r"""<!doctype html>
 
     $("collectBtn").addEventListener("click", async () => {
       const button = $("collectBtn");
+      currentUrls = [];
+      downloadedByUrl.clear();
+      $("count").textContent = "0 条";
+      $("list").innerHTML = '<div class="empty">正在等待新的作品...</div>';
       button.disabled = true;
       setStatus("collectStatus", "正在创建拉取任务...");
       try {
@@ -883,12 +902,13 @@ def run_web_server(host: str, port: int, cache_dir: Path) -> None:
                         max_scrolls = max(1, min(max_scrolls, (target_count + 17) // 18 + 2))
 
                     def collect_task(progress) -> dict[str, Any]:
-                        progress("等待 Chrome 扩展接收任务，请确认扩展已重载到 0.4.0")
+                        progress(f"等待 Chrome 扩展接收任务，请确认扩展已重载到 {EXPECTED_EXTENSION_VERSION}")
                         result = run_extension_profile_collect(
                             homepage_url,
                             max_scrolls=max_scrolls,
                             target_count=target_count,
                             wait_seconds=wait_seconds,
+                            progress_callback=progress,
                         )
                         if not result.get("ok"):
                             raise RuntimeError(result.get("error") or "Chrome 扩展拉取失败")
@@ -1485,7 +1505,7 @@ def download_url(context, url: str, destination: Path, referer: str) -> None:
                 "Chrome/124.0.0.0 Safari/537.36"
             ),
         },
-        timeout=120_000,
+        timeout=90_000,
     )
     if not response.ok:
         raise RuntimeError(f"Download failed: HTTP {response.status} {url}")
@@ -1630,7 +1650,7 @@ def download_work_media(
             media = extract_media_from_payload(payload, work_id)
 
         page.on("response", handle_response)
-        page.goto(work_url, wait_until="domcontentloaded", timeout=60_000)
+        page.goto(work_url, wait_until="domcontentloaded", timeout=45_000)
         page.wait_for_timeout(int(wait_seconds * 1000))
         close_popups(page)
 
@@ -1645,7 +1665,7 @@ def download_work_media(
             message = f"retry_with_standard_url: {fallback_url}"
             emit_progress(progress_callback, "正在改用标准作品地址重试")
             print(message, file=sys.stderr, flush=True)
-            page.goto(fallback_url, wait_until="domcontentloaded", timeout=60_000)
+            page.goto(fallback_url, wait_until="domcontentloaded", timeout=45_000)
             page.wait_for_timeout(int(wait_seconds * 1000))
             close_popups(page)
 
@@ -2049,6 +2069,7 @@ def run_extension_bridge(
     state: dict[str, Any] = {
         "delivered": False,
         "result": None,
+        "progress": None,
     }
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -2085,6 +2106,20 @@ def run_extension_bridge(
             self._send_json(404, {"ok": False, "error": "not found"})
 
         def do_POST(self) -> None:
+            if self.path == "/progress":
+                length = int(self.headers.get("content-length", "0") or "0")
+                try:
+                    payload = json.loads(self.rfile.read(length).decode("utf-8", errors="replace"))
+                except Exception as exc:
+                    self._send_json(400, {"ok": False, "error": str(exc)})
+                    return
+                if payload.get("id") != command_id:
+                    self._send_json(409, {"ok": False, "error": "command id mismatch"})
+                    return
+                state["progress"] = payload.get("data") or {}
+                self._send_json(200, {"ok": True})
+                return
+
             if self.path != "/result":
                 self._send_json(404, {"ok": False, "error": "not found"})
                 return
@@ -2160,6 +2195,7 @@ def run_extension_profile_collect(
     wait_seconds: float,
     port: int = 18765,
     timeout_seconds: float | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     command_id = uuid.uuid4().hex
     if timeout_seconds is None:
@@ -2179,6 +2215,7 @@ def run_extension_profile_collect(
     state: dict[str, Any] = {
         "delivered": False,
         "result": None,
+        "progress": None,
     }
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -2215,6 +2252,20 @@ def run_extension_profile_collect(
             self._send_json(404, {"ok": False, "error": "not found"})
 
         def do_POST(self) -> None:
+            if self.path == "/progress":
+                length = int(self.headers.get("content-length", "0") or "0")
+                try:
+                    payload = json.loads(self.rfile.read(length).decode("utf-8", errors="replace"))
+                except Exception as exc:
+                    self._send_json(400, {"ok": False, "error": str(exc)})
+                    return
+                if payload.get("id") != command_id:
+                    self._send_json(409, {"ok": False, "error": "command id mismatch"})
+                    return
+                state["progress"] = payload.get("data") or {}
+                self._send_json(200, {"ok": True})
+                return
+
             if self.path != "/result":
                 self._send_json(404, {"ok": False, "error": "not found"})
                 return
@@ -2250,8 +2301,21 @@ def run_extension_profile_collect(
     )
 
     deadline = time.time() + timeout_seconds
+    last_progress_signature = ""
     try:
         while time.time() < deadline:
+            progress_data = state.get("progress") or {}
+            progress_signature = json.dumps(progress_data, ensure_ascii=False, sort_keys=True)
+            if progress_data and progress_signature != last_progress_signature:
+                last_progress_signature = progress_signature
+                progress_items = progress_data.get("items") or []
+                if target_count:
+                    progress_items = progress_items[:target_count]
+                if progress_callback:
+                    progress_callback(
+                        f"正在拉取：第 {progress_data.get('scroll', 0)} 轮，已发现 {len(progress_items)} 条，捕获分页 {progress_data.get('capturedPages', 0)} 页",
+                        {"urls": [item.get("url") for item in progress_items if isinstance(item, dict) and item.get("url")], "items": progress_items, "partial": True},
+                    )
             if state["result"] is not None:
                 result = state["result"]
                 if not result.get("ok"):
@@ -2304,7 +2368,7 @@ def run_extension_profile_collect(
         "ok": False,
         "error": (
             "Timed out waiting for Chrome extension. "
-            "Reload extension version 0.4.0, keep Chrome open, and retry."
+            f"Reload extension version {EXPECTED_EXTENSION_VERSION}, keep Chrome open, and retry."
         ),
         "delivered": state["delivered"],
     }
