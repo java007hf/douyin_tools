@@ -1,23 +1,18 @@
-# Douyin Work URL Collector
+# Douyin Tools
 
-这个项目提供一个 Python 脚本：
+这个项目提供一个 Python 命令行工具，用来处理抖音 Web 页面上的作品数据：
 
-- 输入抖音博主主页地址，抓取当前博主自己的作品地址列表。
+- 输入博主主页地址，获取当前博主自己的作品地址列表。
 - 输入单个作品地址，下载作品里的视频或图片到本地。
+- 对指定作品执行评论、点赞、收藏。
 
-脚本基于 Playwright 打开抖音网页并监听接口响应。抓主页列表时会用主页 URL 里的 `sec_uid` 匹配接口里的 `author.sec_uid`，避免把推荐流、导航入口、其他博主作品误抓进来。
+主页作品抓取会用主页 URL 里的 `sec_uid` 匹配接口返回的 `author.sec_uid`，避免把推荐流、导航入口或其他博主的作品混进结果。
 
 ## 环境安装
 
 ```powershell
 pip install -r requirements.txt
 python -m playwright install chromium
-```
-
-依赖文件：
-
-```text
-requirements.txt
 ```
 
 ## 抓取博主主页作品列表
@@ -32,12 +27,6 @@ python douyin_work_urls.py "主页地址" -o cache\urls.txt
 
 ```powershell
 python douyin_work_urls.py "https://www.douyin.com/user/MS4wLjABAAAApzZePR1kYLd7RXrQvyj5kKJvuK7XvEw-oeNe-ahH5PI?from_tab_name=main&relation=0&vid=7652265576731359337" -o cache\urls.txt
-```
-
-输出到 JSON：
-
-```powershell
-python douyin_work_urls.py "主页地址" -o urls.json
 ```
 
 作品很多时，加大分页滚动次数和等待时间：
@@ -84,76 +73,128 @@ python douyin_work_urls.py --download "https://www.douyin.com/user/MS4wLjABAAAAW
 python douyin_work_urls.py --download "https://www.douyin.com/video/7577345577656035574" --download-dir cache\downloads
 ```
 
-下载时遇到登录、验证码或拿不到媒体地址：
-
-```powershell
-python douyin_work_urls.py --download "作品地址" --download-dir cache\downloads --user-data-dir cache\.douyin-browser --headful
-```
-
-默认下载策略：
-
-- `/video/` 作品默认下载 1 个视频文件；如果接口返回多个候选视频源，会默认选择文件大小最大的源。
-- `/note/` 如果接口返回视频，会优先下载视频。
-- `/note/` 如果是纯图文，会下载图片文件。
-- 如果想把接口里的所有候选视频源、图片都下载下来，加 `--all-media`。
-
-下载所有候选媒体：
+下载全部候选媒体：
 
 ```powershell
 python douyin_work_urls.py --download "作品地址" --download-dir cache\downloads --all-media
 ```
+
+下载实现原理：脚本先通过 Playwright 打开页面并监听抖音 Web 接口，从接口返回的作品结构里提取 `video.play_addr`、`play_addr_h264`、`images` 等媒体 URL，然后再用 HTTP 把这些播放流或图片地址保存到本地。它不是调用“下载按钮”，所以作品是否允许前端下载按钮可用，不一定等同于脚本能否拿到播放流；但如果抖音风控、登录状态、签名或临时播放地址失效，下载仍然会失败。
+
+## 推荐的互动方式：Chrome 扩展桥接
+
+`--extension-interact` 是当前最稳定的互动方式。Python 不启动也不操控浏览器，只启动本地桥接服务；已安装的 Chrome 扩展在抖音页面上下文里接收任务并执行请求。
+
+安装扩展：
+
+1. 打开 Chrome。
+2. 进入 `chrome://extensions/`。
+3. 打开“开发者模式”。
+4. 点击“加载已解压的扩展程序”。
+5. 选择本项目的 `chrome_extension` 目录。
+6. 确认扩展版本是 `0.3.9`；代码更新后需要在扩展页点击“重新加载”。
+
+执行评论、点赞、收藏：
+
+```powershell
+python douyin_work_urls.py --extension-interact "作品地址" --comment "我也来一台" --like --favorite
+```
+
+支持带 `modal_id` 的主页弹窗地址：
+
+```powershell
+python douyin_work_urls.py --extension-interact "https://www.douyin.com/user/MS4wLjABAAAAe1U5r2VogLrabUBs8ebistBpRd4naDk_4GuPbE1ozgOLt6obzQ8lgTOn4hvs6ZUH?modal_id=7208412974606798138" --comment "xuedaole" --like --favorite
+```
+
+导出结果到日志文件：
+
+```powershell
+python douyin_work_urls.py --extension-interact "作品地址" --comment "xuedaole" --like --favorite > cache\extension_result.json
+```
+
+PowerShell 重定向出来的 JSON 可能是 UTF-16，使用项目里的分析脚本查看结果：
+
+```powershell
+python analyze_extension_result.py cache\extension_result.json
+```
+
+成功结果应重点看这些字段：
+
+```text
+version: 0.3.9
+readiness.reason: captured-comment-list
+ACTION like     success: true
+ACTION favorite success: true
+ACTION comment  success: true，并且 comment_id 不为空
+```
+
+扩展桥接的等待逻辑：
+
+- Python 从输入 URL 提取 `modal_id` 或作品 ID。
+- Python 把任务交给本地桥接服务 `http://127.0.0.1:18765`。
+- 扩展收到任务后打开标准作品页，例如 `https://www.douyin.com/video/<作品ID>`。
+- 扩展等待页面加载完成，再等待抖音页面捕获到目标作品的 `comment/list` 接口。
+- 捕获到目标作品接口后，再在页面上下文调用互动接口。
+
+当前使用的互动接口：
+
+```text
+点赞: /aweme/v1/web/commit/item/digg/
+收藏: /aweme/v1/web/aweme/collect/
+评论: /aweme/v1/web/comment/publish/
+```
+
+注意：旧的 `/aweme/v1/web/aweme/favorite/` 在当前页面里可能返回收藏列表，不是可靠的收藏动作接口；扩展版本 `0.3.9` 已改用 `collect`。
+
+## 其他互动方式
+
+页面自动化模式会用 Playwright 打开浏览器并点击页面按钮：
+
+```powershell
+python douyin_work_urls.py --interact "作品地址" --comment "评论内容" --like --favorite --headful --user-data-dir cache\.douyin-browser
+```
+
+直接接口模式会复用浏览器 cookie 组装 Web API 请求，但容易缺少抖音页面运行时生成的签名参数：
+
+```powershell
+python douyin_work_urls.py --api-interact "作品地址" --comment "评论内容" --like --favorite --user-data-dir cache\.douyin-browser
+```
+
+一般优先使用 `--extension-interact`。
 
 ## 常用参数
 
 ```text
 -o, --output          抓主页列表时的输出文件；.json 输出 JSON，否则一行一个 URL
 --headful             显示浏览器窗口，适合手动登录或处理验证码
+--user-data-dir       浏览器资料目录，建议使用 cache\.douyin-browser
 --max-scrolls         抓主页列表时最多滚动次数，默认 500
---idle-rounds         连续多少次没有新作品后停止，默认 20
+--idle-rounds         连续多少轮没有新作品后停止，默认 20
 --target-count        抓到指定数量后停止
 --scroll-pixels       每次滚动距离，默认 3500
 --wait                每次滚动后的等待秒数，默认 1.5
---user-data-dir       浏览器资料目录；建议测试时使用 cache\.douyin-browser
 --download            下载单个作品地址
---download-dir        下载保存目录；建议使用 cache\downloads
+--download-dir        下载保存目录，建议使用 cache\downloads
 --all-media           下载接口里的全部候选媒体
+--interact            通过页面自动化执行互动
+--api-interact        通过直接 Web API 执行互动
+--extension-interact  通过已安装 Chrome 扩展桥接执行互动
+--comment             互动时发布的评论文本
+--like                互动时点赞作品
+--favorite            互动时收藏作品
+--bridge-port         Chrome 扩展桥接服务端口，默认 18765
+--bridge-timeout      等待扩展回传结果的秒数，默认 60
 ```
 
-## 登录状态
+## 文件约定
 
-脚本默认复用 `.douyin-browser` 目录作为浏览器资料目录。你可以先运行一次 `--headful`，在打开的浏览器里完成登录，后续再次运行通常会复用登录状态。
-
-示例：
-
-```powershell
-python douyin_work_urls.py "主页地址" --headful --user-data-dir cache\.douyin-browser -o cache\urls.txt
-```
-
-或：
-
-```powershell
-python douyin_work_urls.py --download "作品地址" --headful --user-data-dir cache\.douyin-browser --download-dir cache\downloads
-```
-
-## 输出文件
-
-抓列表输出示例：
+所有临时文件、测试结果、下载内容、浏览器 profile、抓取 URL 列表都放到 `cache/` 下，例如：
 
 ```text
-https://www.douyin.com/video/7677547779459179242
-https://www.douyin.com/note/7657685355588900179
+cache\urls.txt
+cache\downloads\
+cache\.douyin-browser\
+cache\extension_result.json
 ```
 
-下载文件命名示例：
-
-```text
-cache\downloads\7577345577656035574_video_01.mp4
-cache\downloads\7657685355588900179_image_01.webp
-```
-
-## 注意事项
-
-- 抖音接口和网页结构可能变化，脚本依赖 Playwright 模拟真实浏览器访问。
-- 部分作品或主页需要登录、验证码、风控校验，建议用 `--headful` 先登录。
-- 大量作品主页分页可能较慢，可以提高 `--max-scrolls`、`--idle-rounds` 和 `--wait`。
-- 主页弹窗链接不如标准 `/video/<id>` 或 `/note/<id>` 稳定；如果下载失败，优先改成标准作品地址。
+仓库根目录只保留程序、扩展源码和说明文档。

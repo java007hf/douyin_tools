@@ -1,0 +1,61 @@
+body {
+  margin: 0;
+  width: 360px;
+  font-family: Arial, "Microsoft YaHei", sans-serif;
+  color: #161823;
+  background: #fff;
+}
+
+main {
+  padding: 12px;
+}
+
+label {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 10px;
+}
+
+textarea {
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px;
+  border: 1px solid #d8d8d8;
+  border-radius: 6px;
+  resize: vertical;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+button {
+  width: 100%;
+  margin-top: 8px;
+  padding: 9px 10px;
+  border: 1px solid #161823;
+  border-radius: 6px;
+  color: #fff;
+  background: #161823;
+  cursor: pointer;
+}
+
+button + button {
+  color: #161823;
+  background: #fff;
+}
+
+pre {
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 12px 0 0;
+  padding: 8px;
+  border-radius: 6px;
+  background: #f6f6f6;
+  font-size: 12px;
+}

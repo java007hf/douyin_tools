@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <title>Douyin Tools</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main>
+      <label>
+        评论内容
+        <textarea id="comment" rows="3" placeholder="可留空"></textarea>
+      </label>
+
+      <label class="check">
+        <input id="like" type="checkbox">
+        点赞
+      </label>
+
+      <label class="check">
+        <input id="favorite" type="checkbox">
+        收藏
+      </label>
+
+      <button id="run">执行</button>
+      <button id="copy">复制捕获信息</button>
+
+      <pre id="output"></pre>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>
