@@ -1,5 +1,5 @@
 const BRIDGE_BASE = "http://127.0.0.1:18765";
-const EXTENSION_VERSION = "0.3.9";
+const EXTENSION_VERSION = "0.4.0";
 let busy = false;
 
 async function bridgeFetch(path, options = {}) {
@@ -58,22 +58,32 @@ async function sendToContent(tabId, command) {
   try {
     return await chrome.tabs.sendMessage(tabId, {
       source: "douyin-tools-background-v3",
-      action: "interactV3",
+      action: command.action || "interactV3",
       url: command.url,
+      profileUrl: command.profileUrl,
       workId: command.workId,
       comment: command.comment || "",
       like: Boolean(command.like),
-      favorite: Boolean(command.favorite)
+      favorite: Boolean(command.favorite),
+      maxScrolls: command.maxScrolls,
+      targetCount: command.targetCount,
+      waitMs: command.waitMs,
+      timeoutMs: command.timeoutMs
     });
   } catch (error) {
     return chrome.tabs.sendMessage(tabId, {
       source: "douyin-tools-background-v3",
-      action: "interactV3",
+      action: command.action || "interactV3",
       url: command.url,
+      profileUrl: command.profileUrl,
       workId: command.workId,
       comment: command.comment || "",
       like: Boolean(command.like),
-      favorite: Boolean(command.favorite)
+      favorite: Boolean(command.favorite),
+      maxScrolls: command.maxScrolls,
+      targetCount: command.targetCount,
+      waitMs: command.waitMs,
+      timeoutMs: command.timeoutMs
     });
   }
 }

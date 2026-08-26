@@ -15,14 +15,17 @@ from __future__ import annotations
 import argparse
 import http.server
 import json
+import mimetypes
+import os
 import re
+import shutil
 import sys
 import threading
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qsl, urlencode, unquote, urlsplit, urlunsplit
 
 from playwright.sync_api import Page, Response, TimeoutError as PlaywrightTimeoutError
@@ -30,6 +33,7 @@ from playwright.sync_api import sync_playwright
 
 
 NOTE_AWEME_TYPES = {68}
+EXPECTED_EXTENSION_VERSION = "0.4.0"
 
 
 @dataclass(frozen=True)
@@ -37,6 +41,566 @@ class MediaItem:
     kind: str
     url: str
     extension: str
+    label: str = ""
+    width: int = 0
+    height: int = 0
+    bitrate: int = 0
+
+
+WEB_HTML = r"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Douyin 素材工作台</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f8fa;
+      --panel: #ffffff;
+      --ink: #14171f;
+      --muted: #667085;
+      --line: #dde2ea;
+      --accent: #0f766e;
+      --accent-dark: #115e59;
+      --danger: #b42318;
+      --soft: #eef6f4;
+      --shadow: 0 14px 40px rgba(20, 23, 31, .08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+    }
+    header {
+      padding: 22px 28px 14px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+      position: sticky;
+      top: 0;
+      z-index: 3;
+    }
+    h1 {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 650;
+      letter-spacing: 0;
+    }
+    main {
+      display: grid;
+      grid-template-columns: minmax(360px, 480px) minmax(420px, 1fr);
+      gap: 18px;
+      padding: 18px;
+      min-height: calc(100vh - 76px);
+    }
+    section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      min-width: 0;
+    }
+    .left { display: flex; flex-direction: column; gap: 18px; background: transparent; border: 0; box-shadow: none; }
+    .box { padding: 18px; }
+    h2 {
+      margin: 0 0 14px;
+      font-size: 16px;
+      line-height: 1.3;
+    }
+    label {
+      display: block;
+      font-size: 13px;
+      color: var(--muted);
+      margin: 12px 0 6px;
+    }
+    input, textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 10px 11px;
+      font: inherit;
+      min-height: 40px;
+      outline: none;
+      background: #fff;
+    }
+    input:focus, textarea:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(15, 118, 110, .12);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+    }
+    .checks {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin: 12px 0;
+      color: var(--muted);
+      font-size: 13px;
+      flex-wrap: wrap;
+    }
+    .checks label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin: 0;
+    }
+    .checks input { width: auto; min-height: auto; }
+    button, .file-link {
+      border: 0;
+      border-radius: 6px;
+      padding: 9px 12px;
+      font: inherit;
+      cursor: pointer;
+      min-height: 38px;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      white-space: nowrap;
+    }
+    button.primary {
+      background: var(--accent);
+      color: #fff;
+      width: 100%;
+      margin-top: 14px;
+    }
+    button.primary:hover { background: var(--accent-dark); }
+    button.secondary, .file-link {
+      background: var(--soft);
+      color: var(--accent-dark);
+    }
+    button.ghost {
+      background: #f2f4f7;
+      color: #344054;
+    }
+    button:disabled {
+      opacity: .55;
+      cursor: not-allowed;
+    }
+    .status {
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 13px;
+      min-height: 20px;
+      word-break: break-word;
+    }
+    .status.error { color: var(--danger); }
+    .result {
+      padding: 0;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .toolbar {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .count { color: var(--muted); font-size: 13px; }
+    .list {
+      overflow: auto;
+      max-height: calc(100vh - 152px);
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--line);
+      align-items: center;
+    }
+    .url {
+      font-size: 13px;
+      line-height: 1.45;
+      word-break: break-all;
+      color: var(--muted);
+    }
+    .item-main {
+      display: grid;
+      grid-template-columns: 92px 1fr;
+      gap: 12px;
+      align-items: center;
+      min-width: 0;
+    }
+    .thumb {
+      width: 92px;
+      aspect-ratio: 4 / 5;
+      border-radius: 6px;
+      object-fit: cover;
+      background: #eef1f5;
+      border: 1px solid var(--line);
+    }
+    .thumb.empty {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .title {
+      font-size: 14px;
+      line-height: 1.45;
+      margin-bottom: 5px;
+      overflow: hidden;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+    }
+    .meta { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    .empty {
+      padding: 36px 18px;
+      color: var(--muted);
+      text-align: center;
+      font-size: 14px;
+    }
+    .downloads {
+      margin-top: 10px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .item-main .downloads {
+      grid-column: 1 / -1;
+      margin-top: 0;
+    }
+    .modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(16, 24, 40, .72);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 22px;
+      z-index: 10;
+    }
+    .modal.open { display: flex; }
+    .modal-panel {
+      width: min(980px, 96vw);
+      max-height: 92vh;
+      background: #fff;
+      border-radius: 8px;
+      overflow: hidden;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+    .modal-head {
+      padding: 12px 14px;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      border-bottom: 1px solid var(--line);
+    }
+    .modal-body {
+      padding: 14px;
+      overflow: auto;
+      display: grid;
+      gap: 12px;
+      justify-items: center;
+      background: #101828;
+    }
+    .modal-body img, .modal-body video {
+      max-width: 100%;
+      max-height: 78vh;
+      border-radius: 6px;
+      background: #000;
+    }
+    @media (max-width: 940px) {
+      main { grid-template-columns: 1fr; }
+      .list { max-height: none; }
+    }
+  </style>
+</head>
+<body>
+  <header><h1>Douyin 素材工作台</h1></header>
+  <main>
+    <section class="left">
+      <div class="box">
+        <h2>拉取博主素材</h2>
+        <label for="homepageUrl">博主主页地址</label>
+        <textarea id="homepageUrl" rows="3" placeholder="https://www.douyin.com/user/..."></textarea>
+        <div class="grid">
+          <div>
+            <label for="targetCount">目标数量</label>
+            <input id="targetCount" type="number" min="1" placeholder="不限">
+          </div>
+        </div>
+        <button id="collectBtn" class="primary">拉取列表</button>
+        <div id="collectStatus" class="status"></div>
+      </div>
+      <div class="box">
+        <h2>单地址下载</h2>
+        <label for="downloadUrl">作品下载地址</label>
+        <textarea id="downloadUrl" rows="3" placeholder="https://www.douyin.com/video/..."></textarea>
+        <div class="checks">
+          <label><input id="allMediaSingle" type="checkbox"> 下载全部候选媒体</label>
+          <label><input id="headfulDownload" type="checkbox"> 显示浏览器</label>
+        </div>
+        <button id="downloadBtn" class="primary">开始下载</button>
+        <div id="downloadStatus" class="status"></div>
+        <div id="downloadFiles" class="downloads"></div>
+      </div>
+    </section>
+    <section class="result">
+      <div class="toolbar">
+        <strong>素材列表</strong>
+        <span id="count" class="count">0 条</span>
+      </div>
+      <div id="list" class="list"><div class="empty">输入博主主页地址后开始拉取</div></div>
+    </section>
+  </main>
+  <div id="previewModal" class="modal" role="dialog" aria-modal="true">
+    <div class="modal-panel">
+      <div class="modal-head">
+        <strong>本地预览</strong>
+        <button id="closePreview" class="ghost">关闭</button>
+      </div>
+      <div id="previewBody" class="modal-body"></div>
+    </div>
+  </div>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let currentUrls = [];
+    const downloadedByUrl = new Map();
+    const downloadingByUrl = new Set();
+    let singleDownloadedFiles = null;
+
+    function setStatus(id, text, isError = false) {
+      const el = $(id);
+      el.textContent = text || "";
+      el.classList.toggle("error", !!isError);
+    }
+
+    function numberValue(id) {
+      const value = $(id).value.trim();
+      return value ? Number(value) : null;
+    }
+
+    async function postJson(path, data) {
+      const response = await fetch(path, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(data)
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "请求失败");
+      return body;
+    }
+
+    async function waitJob(jobId, statusId, onUpdate) {
+      for (;;) {
+        const response = await fetch(`/api/jobs/${jobId}`);
+        const job = await response.json();
+        if (!response.ok) throw new Error(job.error || "任务不存在");
+        if (statusId) setStatus(statusId, job.message || job.status);
+        if (onUpdate && job.result) onUpdate(job.result, job);
+        if (job.status === "done") return job.result;
+        if (job.status === "error") throw new Error(job.error || "任务失败");
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    }
+
+    function preview(url) {
+      window.open(url, "_blank", "noopener,noreferrer");
+    }
+
+    function openLocalPreview(files) {
+      const body = $("previewBody");
+      body.innerHTML = "";
+      (files || []).forEach((file) => {
+        const isVideo = (file.mime || "").startsWith("video/") || /\.(mp4|mov|webm)$/i.test(file.name || "");
+        const media = document.createElement(isVideo ? "video" : "img");
+        media.src = file.href;
+        if (isVideo) {
+          media.controls = true;
+          media.autoplay = true;
+        } else {
+          media.alt = file.name || "downloaded image";
+        }
+        body.appendChild(media);
+      });
+      $("previewModal").classList.add("open");
+    }
+
+    $("closePreview").addEventListener("click", () => $("previewModal").classList.remove("open"));
+    $("previewModal").addEventListener("click", (event) => {
+      if (event.target === $("previewModal")) $("previewModal").classList.remove("open");
+    });
+
+    function normalizeItem(item) {
+      if (typeof item === "string") return { url: item, title: item, cover: "", type: "" };
+      return {
+        url: item.url || "",
+        title: item.title || item.desc || item.url || "未命名作品",
+        cover: item.cover || "",
+        type: item.type || ""
+      };
+    }
+
+    function renderList(items) {
+      currentUrls = (items || []).map(normalizeItem).filter((item) => item.url);
+      $("count").textContent = `${currentUrls.length} 条`;
+      if (!currentUrls.length) {
+        $("list").innerHTML = '<div class="empty">暂无结果</div>';
+        return;
+      }
+      $("list").innerHTML = "";
+      currentUrls.forEach((item, index) => {
+        const url = item.url;
+        const row = document.createElement("div");
+        row.className = "row";
+        row.innerHTML = `
+          <div class="item-main">
+            <div class="thumb empty">无封面</div>
+            <div>
+              <div class="meta"></div>
+              <div class="title"></div>
+              <div class="url"></div>
+            </div>
+            <div class="downloads"></div>
+          </div>
+          <div class="actions">
+            <button class="secondary" data-action="preview">打开链接</button>
+            <button class="ghost" data-action="download">下载</button>
+          </div>`;
+        const thumbSlot = row.querySelector(".thumb");
+        if (item.cover) {
+          const img = document.createElement("img");
+          img.className = "thumb";
+          img.src = item.cover;
+          img.alt = item.title;
+          img.loading = "lazy";
+          thumbSlot.replaceWith(img);
+        }
+        row.querySelector(".meta").textContent = `#${index + 1}${item.type ? " · " + item.type : ""}`;
+        row.querySelector(".title").textContent = item.title;
+        row.querySelector(".url").textContent = url;
+        row.querySelector('[data-action="preview"]').addEventListener("click", () => preview(url));
+        const downloadButton = row.querySelector('[data-action="download"]');
+        if (downloadedByUrl.has(url)) {
+          downloadButton.textContent = "本地预览";
+        } else if (downloadingByUrl.has(url)) {
+          downloadButton.disabled = true;
+          downloadButton.textContent = "下载中";
+        }
+        row.querySelector('[data-action="download"]').addEventListener("click", async (event) => {
+          const button = event.currentTarget;
+          if (downloadedByUrl.has(url)) {
+            openLocalPreview(downloadedByUrl.get(url));
+            return;
+          }
+          const files = row.querySelector(".downloads");
+          downloadingByUrl.add(url);
+          button.disabled = true;
+          button.textContent = "下载中";
+          files.textContent = "";
+          try {
+            const started = await postJson("/api/download", {
+              url,
+              allMedia: $("allMediaSingle").checked,
+              headful: $("headfulDownload").checked
+            });
+            const result = await waitJob(started.jobId, null, (_partial, job) => {
+              files.textContent = job.message || "下载中";
+            });
+            downloadedByUrl.set(url, result.files || []);
+            files.innerHTML = "";
+            result.files.forEach((file) => {
+              const a = document.createElement("a");
+              a.className = "file-link";
+              a.href = file.href;
+              a.textContent = file.name;
+              a.setAttribute("download", file.name);
+              files.appendChild(a);
+            });
+            button.textContent = "本地预览";
+            button.disabled = false;
+          } catch (error) {
+            files.textContent = error.message;
+            button.textContent = "下载";
+            button.disabled = false;
+          } finally {
+            downloadingByUrl.delete(url);
+          }
+        });
+        $("list").appendChild(row);
+      });
+    }
+
+    $("collectBtn").addEventListener("click", async () => {
+      const button = $("collectBtn");
+      button.disabled = true;
+      setStatus("collectStatus", "正在创建拉取任务...");
+      try {
+        const started = await postJson("/api/collect", {
+          url: $("homepageUrl").value.trim(),
+          targetCount: numberValue("targetCount")
+        });
+        const result = await waitJob(started.jobId, "collectStatus", (partial) => {
+          if (partial.items || partial.urls) renderList(partial.items || partial.urls);
+        });
+        renderList(result.items || result.urls);
+        setStatus("collectStatus", `拉取完成：${result.urls.length} 条`);
+      } catch (error) {
+        setStatus("collectStatus", error.message, true);
+      } finally {
+        button.disabled = false;
+      }
+    });
+
+    $("downloadBtn").addEventListener("click", async () => {
+      const button = $("downloadBtn");
+      if (singleDownloadedFiles) {
+        openLocalPreview(singleDownloadedFiles);
+        return;
+      }
+      button.disabled = true;
+      $("downloadFiles").innerHTML = "";
+      setStatus("downloadStatus", "正在创建下载任务...");
+      try {
+        const started = await postJson("/api/download", {
+          url: $("downloadUrl").value.trim(),
+          allMedia: $("allMediaSingle").checked,
+          headful: $("headfulDownload").checked
+        });
+        const result = await waitJob(started.jobId, "downloadStatus");
+        singleDownloadedFiles = result.files || [];
+        setStatus("downloadStatus", `下载完成：${result.files.length} 个文件`);
+        result.files.forEach((file) => {
+          const a = document.createElement("a");
+          a.className = "file-link";
+          a.href = file.href;
+          a.textContent = file.name;
+          a.setAttribute("download", file.name);
+          $("downloadFiles").appendChild(a);
+        });
+      } catch (error) {
+        setStatus("downloadStatus", error.message, true);
+      } finally {
+        button.disabled = false;
+        if (singleDownloadedFiles) button.textContent = "本地预览";
+      }
+    });
+
+    $("downloadUrl").addEventListener("input", () => {
+      singleDownloadedFiles = null;
+      $("downloadBtn").textContent = "开始下载";
+    });
+  </script>
+</body>
+</html>
+"""
 
 
 def print_json(data: Any) -> None:
@@ -46,6 +610,344 @@ def print_json(data: Any) -> None:
     sys.stdout.write(text)
     sys.stdout.write("\n")
     sys.stdout.flush()
+
+
+ProgressCallback = Callable[[str, dict[str, Any] | None], None]
+
+
+def emit_progress(
+    progress_callback: ProgressCallback | None,
+    message: str,
+    partial_result: dict[str, Any] | None = None,
+) -> None:
+    if progress_callback:
+        progress_callback(message, partial_result)
+
+
+class WebJobStore:
+    def __init__(self) -> None:
+        self._jobs: dict[str, dict[str, Any]] = {}
+        self._lock = threading.Lock()
+
+    def create(self, message: str) -> str:
+        job_id = uuid.uuid4().hex
+        with self._lock:
+            self._jobs[job_id] = {
+                "id": job_id,
+                "status": "running",
+                "message": message,
+                "created_at": time.time(),
+            }
+        return job_id
+
+    def update(self, job_id: str, **fields: Any) -> None:
+        with self._lock:
+            if job_id in self._jobs:
+                self._jobs[job_id].update(fields)
+                self._jobs[job_id]["updated_at"] = time.time()
+
+    def get(self, job_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            return dict(job) if job else None
+
+
+def web_json_response(handler: http.server.BaseHTTPRequestHandler, status: int, data: Any) -> None:
+    body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+    handler.send_response(status)
+    handler.send_header("content-type", "application/json; charset=utf-8")
+    handler.send_header("content-length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def web_text_response(
+    handler: http.server.BaseHTTPRequestHandler,
+    status: int,
+    body: str,
+    content_type: str = "text/html; charset=utf-8",
+) -> None:
+    encoded = body.encode("utf-8")
+    handler.send_response(status)
+    handler.send_header("content-type", content_type)
+    handler.send_header("content-length", str(len(encoded)))
+    handler.end_headers()
+    handler.wfile.write(encoded)
+
+
+def read_json_request(handler: http.server.BaseHTTPRequestHandler) -> dict[str, Any]:
+    length = int(handler.headers.get("content-length") or "0")
+    if length <= 0:
+        return {}
+    raw = handler.rfile.read(length)
+    data = json.loads(raw.decode("utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("JSON body must be an object")
+    return data
+
+
+def json_bool(data: dict[str, Any], key: str, default: bool = False) -> bool:
+    value = data.get(key, default)
+    return bool(value)
+
+
+def json_positive_int(data: dict[str, Any], key: str, default: int | None = None) -> int | None:
+    value = data.get(key)
+    if value in (None, ""):
+        return default
+    number = int(value)
+    if number <= 0:
+        raise ValueError(f"{key} must be greater than 0")
+    return number
+
+
+def json_positive_float(data: dict[str, Any], key: str, default: float) -> float:
+    value = data.get(key)
+    if value in (None, ""):
+        return default
+    number = float(value)
+    if number <= 0:
+        raise ValueError(f"{key} must be greater than 0")
+    return number
+
+
+def file_result(path: Path, download_root: Path) -> dict[str, str]:
+    relative = path.resolve().relative_to(download_root.resolve()).as_posix()
+    mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return {
+        "name": path.name,
+        "href": f"/downloads/{relative}",
+        "mime": mime,
+    }
+
+
+def start_web_job(
+    jobs: WebJobStore,
+    message: str,
+    target,
+    *args: Any,
+    **kwargs: Any,
+) -> str:
+    job_id = jobs.create(message)
+
+    def runner() -> None:
+        try:
+            def progress(update: str, partial_result: dict[str, Any] | None = None) -> None:
+                fields: dict[str, Any] = {"message": update}
+                if partial_result is not None:
+                    fields["result"] = partial_result
+                jobs.update(job_id, **fields)
+
+            result = target(progress, *args, **kwargs)
+            jobs.update(job_id, status="done", message="完成", result=result)
+        except Exception as exc:
+            jobs.update(job_id, status="error", message="失败", error=str(exc))
+
+    thread = threading.Thread(target=runner, name=f"douyin-web-job-{job_id[:8]}", daemon=True)
+    thread.start()
+    return job_id
+
+
+def seed_browser_profile(source: Path, target: Path) -> None:
+    if not source.is_dir() or any(target.iterdir()):
+        return
+    for child in source.iterdir():
+        destination = target / child.name
+        try:
+            if child.is_dir():
+                shutil.copytree(child, destination, ignore=shutil.ignore_patterns("Singleton*"))
+            elif not child.name.startswith("Singleton"):
+                shutil.copy2(child, destination)
+        except OSError:
+            continue
+
+
+def run_web_server(host: str, port: int, cache_dir: Path) -> None:
+    cache_dir = cache_dir.resolve()
+    download_root = cache_dir / "web_downloads"
+    url_list_root = cache_dir / "web_url_lists"
+    legacy_user_data_dir = cache_dir / ".douyin-browser"
+    collect_user_data_dir = cache_dir / ".douyin-browser-collect"
+    download_user_data_dir = cache_dir / ".douyin-browser-download"
+    download_root.mkdir(parents=True, exist_ok=True)
+    url_list_root.mkdir(parents=True, exist_ok=True)
+    collect_user_data_dir.mkdir(parents=True, exist_ok=True)
+    download_user_data_dir.mkdir(parents=True, exist_ok=True)
+    seed_browser_profile(legacy_user_data_dir, collect_user_data_dir)
+    seed_browser_profile(legacy_user_data_dir, download_user_data_dir)
+    jobs = WebJobStore()
+
+    class DouyinWebHandler(http.server.BaseHTTPRequestHandler):
+        server_version = "DouyinWeb/0.1"
+
+        def log_message(self, format: str, *args: Any) -> None:
+            print(
+                f"{self.address_string()} - {format % args}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        def do_GET(self) -> None:
+            if self.path in ("/", "/index.html"):
+                web_text_response(self, 200, WEB_HTML)
+                return
+
+            if self.path.startswith("/api/jobs/"):
+                job_id = self.path.rsplit("/", 1)[-1]
+                job = jobs.get(job_id)
+                if not job:
+                    web_json_response(self, 404, {"error": "任务不存在"})
+                    return
+                web_json_response(self, 200, job)
+                return
+
+            if self.path.startswith("/downloads/"):
+                relative = unquote(self.path[len("/downloads/") :].split("?", 1)[0])
+                try:
+                    target = (download_root / relative).resolve()
+                    target.relative_to(download_root.resolve())
+                except ValueError:
+                    web_json_response(self, 403, {"error": "禁止访问该文件"})
+                    return
+                if not target.is_file():
+                    web_json_response(self, 404, {"error": "文件不存在"})
+                    return
+                content_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+                file_size = target.stat().st_size
+                range_header = self.headers.get("range")
+                start = 0
+                end = file_size - 1
+                status = 200
+                if range_header:
+                    match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header.strip())
+                    if not match:
+                        self.send_response(416)
+                        self.send_header("content-range", f"bytes */{file_size}")
+                        self.end_headers()
+                        return
+                    if match.group(1):
+                        start = int(match.group(1))
+                    if match.group(2):
+                        end = int(match.group(2))
+                    if match.group(1) == "" and match.group(2):
+                        suffix_length = int(match.group(2))
+                        start = max(file_size - suffix_length, 0)
+                        end = file_size - 1
+                    if start > end or start >= file_size:
+                        self.send_response(416)
+                        self.send_header("content-range", f"bytes */{file_size}")
+                        self.end_headers()
+                        return
+                    end = min(end, file_size - 1)
+                    status = 206
+
+                content_length = end - start + 1
+                self.send_response(status)
+                self.send_header("content-type", content_type)
+                self.send_header("accept-ranges", "bytes")
+                self.send_header("content-length", str(content_length))
+                if status == 206:
+                    self.send_header("content-range", f"bytes {start}-{end}/{file_size}")
+                self.send_header(
+                    "content-disposition",
+                    f'inline; filename="{target.name.replace(chr(34), "_")}"',
+                )
+                self.end_headers()
+                with target.open("rb") as file:
+                    file.seek(start)
+                    remaining = content_length
+                    while remaining > 0:
+                        chunk = file.read(min(1024 * 1024, remaining))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+                return
+
+            web_json_response(self, 404, {"error": "Not found"})
+
+        def do_POST(self) -> None:
+            try:
+                data = read_json_request(self)
+
+                if self.path == "/api/collect":
+                    homepage_url = str(data.get("url") or "").strip()
+                    if not homepage_url:
+                        raise ValueError("请输入博主主页地址")
+                    target_count = json_positive_int(data, "targetCount")
+                    # The web UI is target-driven. Keep these as server-side
+                    # defaults so old API callers remain compatible.
+                    max_scrolls = 80
+                    wait_seconds = 1.5
+                    if target_count:
+                        max_scrolls = max(1, min(max_scrolls, (target_count + 17) // 18 + 2))
+
+                    def collect_task(progress) -> dict[str, Any]:
+                        progress("等待 Chrome 扩展接收任务，请确认扩展已重载到 0.4.0")
+                        result = run_extension_profile_collect(
+                            homepage_url,
+                            max_scrolls=max_scrolls,
+                            target_count=target_count,
+                            wait_seconds=wait_seconds,
+                        )
+                        if not result.get("ok"):
+                            raise RuntimeError(result.get("error") or "Chrome 扩展拉取失败")
+
+                        urls = result.get("urls") or []
+                        items = result.get("items") or []
+                        progress(
+                            f"扩展拉取完成：{len(urls)} 条，捕获分页 {result.get('captured_pages') or 0} 页",
+                            {"urls": urls, "items": items, "partial": True},
+                        )
+                        output = url_list_root / f"urls_{int(time.time())}_{uuid.uuid4().hex[:8]}.json"
+                        output.write_text(json.dumps(urls, ensure_ascii=False, indent=2), encoding="utf-8")
+                        return {
+                            "urls": urls,
+                            "items": items,
+                            "responses": result.get("responses") or [],
+                            "version_warning": result.get("version_warning"),
+                            "output": str(output),
+                        }
+
+                    job_id = start_web_job(jobs, "正在拉取博主素材列表", collect_task)
+                    web_json_response(self, 202, {"jobId": job_id})
+                    return
+
+                if self.path == "/api/download":
+                    work_url = str(data.get("url") or "").strip()
+                    if not work_url:
+                        raise ValueError("请输入作品下载地址")
+                    all_media = json_bool(data, "allMedia")
+                    headful = json_bool(data, "headful")
+
+                    def download_task(progress) -> dict[str, Any]:
+                        paths = download_work_media(
+                            work_url,
+                            output_dir=download_root,
+                            headless=not headful,
+                            user_data_dir=download_user_data_dir,
+                            all_media=all_media,
+                            wait_seconds=1.5,
+                            progress_callback=progress,
+                        )
+                        return {"files": [file_result(path, download_root) for path in paths]}
+
+                    job_id = start_web_job(jobs, "正在下载作品素材", download_task)
+                    web_json_response(self, 202, {"jobId": job_id})
+                    return
+
+                web_json_response(self, 404, {"error": "Not found"})
+            except Exception as exc:
+                web_json_response(self, 400, {"error": str(exc)})
+
+    server = http.server.ThreadingHTTPServer((host, port), DouyinWebHandler)
+    print(f"web listening=http://{host}:{port}", file=sys.stderr, flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
 
 
 def parse_sec_uid(homepage_url: str) -> str:
@@ -84,6 +986,11 @@ def standard_open_url(raw_url: str) -> str:
     if re.search(r"/note/[^/?#]+$", path):
         return f"https://www.douyin.com/note/{work_id}"
     return standard_video_url(work_id)
+
+
+def is_note_work_url(raw_url: str) -> bool:
+    path = unquote(urlsplit(raw_url).path).rstrip("/")
+    return bool(re.search(r"/note/[^/?#]+$", path))
 
 
 def close_popups(page: Page) -> None:
@@ -195,6 +1102,89 @@ def work_url_from_aweme(item: dict[str, Any]) -> str | None:
     return f"https://www.douyin.com/{path_type}/{aweme_id}"
 
 
+def aweme_title(item: dict[str, Any]) -> str:
+    for key in ("desc", "caption", "title", "share_title", "shareTitle"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    share_info = item.get("share_info") or item.get("shareInfo")
+    if isinstance(share_info, dict):
+        for key in ("share_title", "shareTitle", "title", "desc"):
+            value = share_info.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    return "未命名作品"
+
+
+def aweme_cover_url(item: dict[str, Any]) -> str:
+    image_post_info = item.get("image_post_info") or item.get("imagePostInfo")
+    image_groups = [
+        item.get("images"),
+        item.get("image_infos"),
+        item.get("imageInfos"),
+    ]
+    if isinstance(image_post_info, dict):
+        image_groups.extend(
+            [
+                image_post_info.get("images"),
+                image_post_info.get("image_infos"),
+                image_post_info.get("imageInfos"),
+            ]
+        )
+
+    for images in image_groups:
+        if not isinstance(images, list):
+            continue
+        for image in images:
+            if not isinstance(image, dict):
+                continue
+            for key in (
+                "url_list",
+                "urlList",
+                "display_image",
+                "displayImage",
+                "origin_cover",
+                "originCover",
+                "origin_image",
+                "originImage",
+                "thumbnail",
+                "thumbnail_image",
+                "thumbnailImage",
+            ):
+                if url := first_url(image.get(key)):
+                    return url
+
+    video = item.get("video")
+    if isinstance(video, dict):
+        for key in (
+            "cover",
+            "origin_cover",
+            "originCover",
+            "dynamic_cover",
+            "dynamicCover",
+            "animated_cover",
+            "animatedCover",
+        ):
+            if url := first_url(video.get(key)):
+                return url
+
+    return ""
+
+
+def work_item_from_aweme(item: dict[str, Any]) -> dict[str, str] | None:
+    url = work_url_from_aweme(item)
+    if not url:
+        return None
+    return {
+        "url": url,
+        "title": aweme_title(item),
+        "cover": aweme_cover_url(item),
+        "type": "图文" if is_note_work_url(url) else "视频",
+    }
+
+
 def aweme_id_matches(item: dict[str, Any], work_id: str) -> bool:
     aweme_id = item.get("aweme_id") or item.get("awemeId") or item.get("id")
     return str(aweme_id) == work_id
@@ -214,12 +1204,39 @@ def first_url(value: Any) -> str | None:
     return None
 
 
-def add_media(items: list[MediaItem], seen: set[str], kind: str, url: str | None) -> None:
+def int_value(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def add_media(
+    items: list[MediaItem],
+    seen: set[str],
+    kind: str,
+    url: str | None,
+    *,
+    label: str = "",
+    width: int = 0,
+    height: int = 0,
+    bitrate: int = 0,
+) -> None:
     if not url or url in seen:
         return
     seen.add(url)
     extension = "mp4" if kind == "video" else image_extension_from_url(url)
-    items.append(MediaItem(kind=kind, url=url, extension=extension))
+    items.append(
+        MediaItem(
+            kind=kind,
+            url=url,
+            extension=extension,
+            label=label,
+            width=width,
+            height=height,
+            bitrate=bitrate,
+        )
+    )
 
 
 def image_extension_from_url(url: str) -> str:
@@ -237,17 +1254,76 @@ def extract_media_from_aweme(item: dict[str, Any]) -> list[MediaItem]:
     video = item.get("video")
     if isinstance(video, dict):
         for key in ("play_addr", "download_addr", "playAddr", "downloadAddr"):
-            add_media(media, seen, "video", first_url(video.get(key)))
+            add_media(
+                media,
+                seen,
+                "video",
+                first_url(video.get(key)),
+                label=key,
+                width=int_value(video.get("width")),
+                height=int_value(video.get("height")),
+                bitrate=int_value(video.get("bit_rate") or video.get("bitRate")),
+            )
 
         bit_rates = video.get("bit_rate") or video.get("bitRate") or []
         if isinstance(bit_rates, list):
             for bit_rate in bit_rates:
                 if isinstance(bit_rate, dict):
-                    add_media(media, seen, "video", first_url(bit_rate.get("play_addr")))
-                    add_media(media, seen, "video", first_url(bit_rate.get("playAddr")))
+                    label = str(
+                        bit_rate.get("gear_name")
+                        or bit_rate.get("gearName")
+                        or bit_rate.get("format")
+                        or "bit_rate"
+                    )
+                    add_media(
+                        media,
+                        seen,
+                        "video",
+                        first_url(bit_rate.get("play_addr")),
+                        label=label,
+                        width=int_value(bit_rate.get("width") or video.get("width")),
+                        height=int_value(bit_rate.get("height") or video.get("height")),
+                        bitrate=int_value(
+                            bit_rate.get("bit_rate")
+                            or bit_rate.get("bitRate")
+                            or bit_rate.get("quality_type")
+                            or bit_rate.get("qualityType")
+                        ),
+                    )
+                    add_media(
+                        media,
+                        seen,
+                        "video",
+                        first_url(bit_rate.get("playAddr")),
+                        label=label,
+                        width=int_value(bit_rate.get("width") or video.get("width")),
+                        height=int_value(bit_rate.get("height") or video.get("height")),
+                        bitrate=int_value(
+                            bit_rate.get("bit_rate")
+                            or bit_rate.get("bitRate")
+                            or bit_rate.get("quality_type")
+                            or bit_rate.get("qualityType")
+                        ),
+                    )
 
-    images = item.get("images") or item.get("image_infos") or item.get("imageInfos") or []
-    if isinstance(images, list):
+    image_groups = [
+        item.get("images"),
+        item.get("image_infos"),
+        item.get("imageInfos"),
+    ]
+    image_post_info = item.get("image_post_info") or item.get("imagePostInfo")
+    if isinstance(image_post_info, dict):
+        image_groups.extend(
+            [
+                image_post_info.get("images"),
+                image_post_info.get("image_infos"),
+                image_post_info.get("imageInfos"),
+            ]
+        )
+
+    for images in image_groups:
+        if not isinstance(images, list):
+            continue
         for image in images:
             if not isinstance(image, dict):
                 continue
@@ -257,7 +1333,14 @@ def extract_media_from_aweme(item: dict[str, Any]) -> list[MediaItem]:
                 "download_url_list",
                 "downloadUrlList",
                 "display_image",
+                "displayImage",
                 "origin_cover",
+                "originCover",
+                "origin_image",
+                "originImage",
+                "thumbnail",
+                "thumbnail_image",
+                "thumbnailImage",
             ):
                 add_media(media, seen, "image", first_url(image.get(key)))
 
@@ -273,6 +1356,43 @@ def extract_media_from_payload(payload: Any, work_id: str) -> list[MediaItem]:
     return []
 
 
+def extract_media_from_page_dom(page: Page, *, prefer_images: bool) -> list[MediaItem]:
+    if not prefer_images:
+        return []
+
+    image_urls = page.evaluate(
+        """() => {
+            const seen = new Set();
+            return Array.from(document.images)
+                .map(img => ({
+                    src: img.currentSrc || img.src,
+                    width: img.naturalWidth || 0,
+                    height: img.naturalHeight || 0,
+                }))
+                .filter(item => item.src && !item.src.startsWith('data:'))
+                .filter(item => item.width >= 600 && item.height >= 600)
+                .filter(item => item.src.includes('aweme_images') || item.src.includes('PackSourceEnum_AWEME_DETAIL'))
+                .sort((a, b) => (b.width * b.height) - (a.width * a.height))
+                .filter(item => {
+                    const key = item.src.split('?')[0];
+                    if (seen.has(key)) return false;
+                    seen.add(key);
+                    return true;
+                })
+                .map(item => item.src);
+        }"""
+    )
+    if not isinstance(image_urls, list):
+        return []
+
+    media: list[MediaItem] = []
+    seen: set[str] = set()
+    for image_url in image_urls:
+        if isinstance(image_url, str):
+            add_media(media, seen, "image", image_url, label="dom_aweme_image")
+    return media
+
+
 def extract_work_urls_from_payload(payload: Any, sec_uid: str) -> set[str]:
     urls: set[str] = set()
     for item in iter_dicts(payload):
@@ -281,6 +1401,17 @@ def extract_work_urls_from_payload(payload: Any, sec_uid: str) -> set[str]:
         if url := work_url_from_aweme(item):
             urls.add(url)
     return urls
+
+
+def extract_work_items_from_payload(payload: Any, sec_uid: str) -> dict[str, dict[str, str]]:
+    items: dict[str, dict[str, str]] = {}
+    for item in iter_dicts(payload):
+        if not author_matches(item, sec_uid):
+            continue
+        work_item = work_item_from_aweme(item)
+        if work_item:
+            items[work_item["url"]] = work_item
+    return items
 
 
 def payload_page_info(payload: Any) -> tuple[Any, Any]:
@@ -382,17 +1513,82 @@ def media_content_length(context, item: MediaItem, referer: str) -> int:
         return 0
 
 
-def choose_default_media(context, media: list[MediaItem], referer: str) -> list[MediaItem]:
+def mp4_handler_types(data: bytes) -> set[str]:
+    handlers: set[str] = set()
+
+    def walk(start: int, end: int) -> None:
+        offset = start
+        while offset + 8 <= end:
+            size = int.from_bytes(data[offset : offset + 4], "big", signed=False)
+            box_type = data[offset + 4 : offset + 8]
+            header_size = 8
+            if size == 1 and offset + 16 <= end:
+                size = int.from_bytes(data[offset + 8 : offset + 16], "big", signed=False)
+                header_size = 16
+            elif size == 0:
+                size = end - offset
+            if size < header_size or offset + size > len(data):
+                break
+
+            payload_start = offset + header_size
+            payload_end = offset + size
+            if box_type == b"hdlr" and payload_start + 12 <= payload_end:
+                handler = data[payload_start + 8 : payload_start + 12].decode("latin1", errors="ignore")
+                if handler:
+                    handlers.add(handler)
+            elif box_type in {b"moov", b"trak", b"mdia", b"minf", b"stbl"}:
+                walk(payload_start, payload_end)
+            offset += size
+
+    walk(0, len(data))
+    return handlers
+
+
+def downloaded_file_has_video(path: Path) -> bool:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return False
+    handlers = mp4_handler_types(data)
+    return "vide" in handlers
+
+
+def media_rank(context, item: MediaItem, referer: str) -> tuple[int, int, int, int]:
+    lowered = f"{item.url} {item.label}".lower()
+    penalty = 0
+    if "audio" in lowered or "music" in lowered or "soun" in lowered:
+        penalty -= 5_000_000_000
+    if "dash" in lowered or "adaptation" in lowered:
+        penalty -= 500_000_000
+    if "watermark" in lowered or "download" in lowered:
+        penalty += 100_000_000
+
+    area = item.width * item.height
+    length = media_content_length(context, item, referer)
+    return (penalty + area, item.bitrate, length, -len(item.url))
+
+
+def choose_default_media(
+    context,
+    media: list[MediaItem],
+    referer: str,
+    *,
+    prefer_images: bool = False,
+) -> list[MediaItem]:
+    images = [item for item in media if item.kind == "image"]
+    if prefer_images and images:
+        return images[:1]
+
     videos = [item for item in media if item.kind == "video"]
     if videos:
         ranked = sorted(
             videos,
-            key=lambda item: media_content_length(context, item, referer),
+            key=lambda item: media_rank(context, item, referer),
             reverse=True,
         )
-        return ranked[:1]
+        return ranked
 
-    return media
+    return images or media
 
 
 def download_work_media(
@@ -403,9 +1599,12 @@ def download_work_media(
     user_data_dir: Path,
     all_media: bool = False,
     wait_seconds: float = 6.0,
+    progress_callback: ProgressCallback | None = None,
 ) -> list[Path]:
     work_id = parse_work_id(work_url)
+    prefer_images = is_note_work_url(work_url)
     output_dir.mkdir(parents=True, exist_ok=True)
+    emit_progress(progress_callback, "正在打开作品页面")
 
     with sync_playwright() as playwright:
         context = playwright.chromium.launch_persistent_context(
@@ -438,14 +1637,23 @@ def download_work_media(
         if not media:
             page.mouse.click(640, 450)
             page.keyboard.press("Space")
+            emit_progress(progress_callback, "正在触发页面播放以捕获媒体接口")
             page.wait_for_timeout(2500)
 
-        if not media and f"/video/{work_id}" not in page.url:
-            fallback_url = standard_video_url(work_id)
-            print(f"retry_with_standard_url: {fallback_url}", file=sys.stderr, flush=True)
+        fallback_url = standard_open_url(work_url)
+        if not media and fallback_url not in page.url:
+            message = f"retry_with_standard_url: {fallback_url}"
+            emit_progress(progress_callback, "正在改用标准作品地址重试")
+            print(message, file=sys.stderr, flush=True)
             page.goto(fallback_url, wait_until="domcontentloaded", timeout=60_000)
             page.wait_for_timeout(int(wait_seconds * 1000))
             close_popups(page)
+
+        if not media and prefer_images:
+            emit_progress(progress_callback, "接口未返回媒体，正在从页面图片提取")
+            media = extract_media_from_page_dom(page, prefer_images=prefer_images)
+            if media:
+                print(f"dom_media_found images={len(media)}", file=sys.stderr, flush=True)
 
         if not media:
             context.close()
@@ -454,15 +1662,45 @@ def download_work_media(
             )
 
         if not all_media:
-            media = choose_default_media(context, media, work_url)
+            media = choose_default_media(context, media, work_url, prefer_images=prefer_images)
+            if prefer_images and not any(item.kind == "image" for item in media):
+                context.close()
+                raise RuntimeError(
+                    "No downloadable image URL was found for this note. Try --headful and finish login/captcha first."
+                )
+        emit_progress(progress_callback, f"已找到 {len(media)} 个候选媒体，开始下载")
 
         downloaded: list[Path] = []
         base_name = safe_name(work_id)
         for index, item in enumerate(media, start=1):
             path = output_dir / f"{base_name}_{item.kind}_{index:02d}.{item.extension}"
-            download_url(context, item.url, path, work_url)
-            downloaded.append(path)
-            print(f"downloaded {item.kind}: {path}", file=sys.stderr, flush=True)
+            emit_progress(progress_callback, f"正在下载候选 {index}/{len(media)}")
+            if all_media or item.kind != "video":
+                download_url(context, item.url, path, work_url)
+                downloaded.append(path)
+                message = f"downloaded {item.kind}: {path}"
+                emit_progress(progress_callback, message)
+                print(message, file=sys.stderr, flush=True)
+                continue
+
+            temp_path = output_dir / f"{base_name}_{item.kind}_{index:02d}.partial.{item.extension}"
+            download_url(context, item.url, temp_path, work_url)
+            if downloaded_file_has_video(temp_path):
+                os.replace(temp_path, path)
+                downloaded.append(path)
+                message = f"downloaded {item.kind}: {path}"
+                emit_progress(progress_callback, message)
+                print(message, file=sys.stderr, flush=True)
+                break
+
+            temp_path.unlink(missing_ok=True)
+            message = f"skipped_audio_only_candidate: {index}/{len(media)}"
+            emit_progress(progress_callback, "当前候选只有音频，正在尝试下一个视频源")
+            print(message, file=sys.stderr, flush=True)
+
+        if not downloaded:
+            context.close()
+            raise RuntimeError("No downloaded candidate contained a video track.")
 
         context.close()
 
@@ -888,9 +2126,9 @@ def run_extension_bridge(
                 result = state["result"]
                 data = ((result.get("result") or {}).get("data") or {})
                 version = data.get("version")
-                if version and version != "0.3.9":
+                if version and version != EXPECTED_EXTENSION_VERSION:
                     result["version_warning"] = (
-                        f"Chrome extension page script version is {version}, expected 0.3.9. "
+                        f"Chrome extension page script version is {version}, expected {EXPECTED_EXTENSION_VERSION}. "
                         "Reload the extension and refresh the douyin.com tab."
                     )
                 elif not version:
@@ -914,6 +2152,164 @@ def run_extension_bridge(
     }
 
 
+def run_extension_profile_collect(
+    homepage_url: str,
+    *,
+    max_scrolls: int,
+    target_count: int | None,
+    wait_seconds: float,
+    port: int = 18765,
+    timeout_seconds: float | None = None,
+) -> dict[str, Any]:
+    command_id = uuid.uuid4().hex
+    if timeout_seconds is None:
+        timeout_seconds = max(90.0, max_scrolls * max(wait_seconds, 0.5) + 45.0)
+
+    command = {
+        "id": command_id,
+        "action": "collectProfile",
+        "url": homepage_url,
+        "openUrl": homepage_url,
+        "profileUrl": homepage_url,
+        "maxScrolls": max_scrolls,
+        "targetCount": target_count,
+        "waitMs": int(wait_seconds * 1000),
+        "timeoutMs": int(timeout_seconds * 1000),
+    }
+    state: dict[str, Any] = {
+        "delivered": False,
+        "result": None,
+    }
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: Any) -> None:
+            return
+
+        def _send_json(self, status: int, payload: dict[str, Any]) -> None:
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("content-type", "application/json; charset=utf-8")
+            self.send_header("access-control-allow-origin", "*")
+            self.send_header("access-control-allow-methods", "GET, POST, OPTIONS")
+            self.send_header("access-control-allow-headers", "content-type")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_OPTIONS(self) -> None:
+            self._send_json(200, {"ok": True})
+
+        def do_GET(self) -> None:
+            if self.path == "/health":
+                self._send_json(200, {"ok": True})
+                return
+
+            if self.path == "/command":
+                if state["delivered"]:
+                    self._send_json(200, {"ok": True, "command": None})
+                    return
+                state["delivered"] = True
+                self._send_json(200, {"ok": True, "command": command})
+                return
+
+            self._send_json(404, {"ok": False, "error": "not found"})
+
+        def do_POST(self) -> None:
+            if self.path != "/result":
+                self._send_json(404, {"ok": False, "error": "not found"})
+                return
+
+            length = int(self.headers.get("content-length", "0") or "0")
+            raw = self.rfile.read(length).decode("utf-8", errors="replace")
+            try:
+                payload = json.loads(raw)
+            except Exception as exc:
+                self._send_json(400, {"ok": False, "error": str(exc)})
+                return
+
+            if payload.get("id") != command_id:
+                self._send_json(409, {"ok": False, "error": "command id mismatch"})
+                return
+
+            state["result"] = payload
+            self._send_json(200, {"ok": True})
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    print(
+        f"extension_profile_collect listening=http://127.0.0.1:{port} command_id={command_id}",
+        file=sys.stderr,
+        flush=True,
+    )
+    print(
+        "Keep Chrome open with the Douyin Tools extension enabled. The extension will open the profile page.",
+        file=sys.stderr,
+        flush=True,
+    )
+
+    deadline = time.time() + timeout_seconds
+    try:
+        while time.time() < deadline:
+            if state["result"] is not None:
+                result = state["result"]
+                if not result.get("ok"):
+                    return {
+                        "ok": False,
+                        "error": result.get("error") or "Chrome extension command failed",
+                        "raw": result,
+                    }
+
+                content_result = result.get("result") or {}
+                if not content_result.get("ok"):
+                    return {
+                        "ok": False,
+                        "error": content_result.get("error") or "Chrome extension page command failed",
+                        "raw": result,
+                    }
+
+                data = content_result.get("data") or {}
+                version = data.get("version")
+                if version and version != EXPECTED_EXTENSION_VERSION:
+                    data["version_warning"] = (
+                        f"Chrome extension page script version is {version}, expected {EXPECTED_EXTENSION_VERSION}. "
+                        "Reload the extension and refresh the douyin.com tab."
+                    )
+                elif not version:
+                    data["version_warning"] = (
+                        "Chrome extension returned an old result format. "
+                        "Reload the extension and refresh the douyin.com tab."
+                    )
+
+                items = data.get("items") or []
+                if target_count:
+                    items = items[:target_count]
+                urls = [item.get("url") for item in items if isinstance(item, dict) and item.get("url")]
+                return {
+                    "ok": True,
+                    "urls": urls,
+                    "items": items,
+                    "responses": data.get("responses") or [],
+                    "captured_pages": data.get("capturedPages"),
+                    "elapsed_ms": data.get("elapsedMs"),
+                    "version_warning": data.get("version_warning"),
+                }
+            time.sleep(0.25)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    return {
+        "ok": False,
+        "error": (
+            "Timed out waiting for Chrome extension. "
+            "Reload extension version 0.4.0, keep Chrome open, and retry."
+        ),
+        "delivered": state["delivered"],
+    }
+
+
 def collect_urls(
     homepage_url: str,
     *,
@@ -924,8 +2320,13 @@ def collect_urls(
     scroll_pixels: int,
     user_data_dir: Path,
     wait_seconds: float,
+    progress_callback: ProgressCallback | None = None,
 ) -> list[str]:
     sec_uid = parse_sec_uid(homepage_url)
+
+    def progress(message: str, urls: set[str]) -> None:
+        items = [work_items.get(url) or {"url": url, "title": url, "cover": "", "type": ""} for url in sorted(urls)]
+        emit_progress(progress_callback, message, {"urls": sorted(urls), "items": items, "partial": True})
 
     with sync_playwright() as playwright:
         context = playwright.chromium.launch_persistent_context(
@@ -940,11 +2341,13 @@ def collect_urls(
         )
         page = context.new_page()
         seen: set[str] = set()
+        work_items: dict[str, dict[str, str]] = {}
         api_hits = 0
         last_has_more: Any = None
         last_cursor: Any = None
         last_api_url: str | None = None
         fetched_cursors: set[str] = set()
+        pagination_blocked = False
 
         def handle_response(response: Response) -> None:
             nonlocal api_hits, last_has_more, last_cursor, last_api_url
@@ -958,14 +2361,16 @@ def collect_urls(
                 last_has_more = has_more
             if max_cursor is not None:
                 last_cursor = max_cursor
-            urls = extract_work_urls_from_payload(payload, sec_uid)
+            items = extract_work_items_from_payload(payload, sec_uid)
+            urls = set(items) or extract_work_urls_from_payload(payload, sec_uid)
             if urls:
                 api_hits += 1
                 last_api_url = response.url
                 seen.update(urls)
+                work_items.update(items)
 
         def fetch_next_cursor() -> int:
-            nonlocal api_hits, last_has_more, last_cursor, last_api_url
+            nonlocal api_hits, last_has_more, last_cursor, last_api_url, pagination_blocked
 
             if not last_api_url or last_cursor is None:
                 return 0
@@ -988,24 +2393,22 @@ def collect_urls(
             )
 
             if not result.get("ok"):
-                print(
-                    f"direct_page_fetch status={result.get('status')} cursor={last_cursor}",
-                    file=sys.stderr,
-                    flush=True,
-                )
+                message = f"direct_page_fetch status={result.get('status')} cursor={last_cursor}"
+                progress(message, seen)
+                print(message, file=sys.stderr, flush=True)
                 return 0
 
             payload = parse_json_text(result["text"])
             if payload is None:
                 snippet = result["text"][:120].replace("\n", "\\n").replace("\r", "\\r")
-                print(
-                    (
-                        f"direct_page_fetch non_json status={result.get('status')} "
-                        f"cursor={last_cursor} body={snippet!r}"
-                    ),
-                    file=sys.stderr,
-                    flush=True,
+                pagination_blocked = True
+                message = (
+                    f"direct_page_fetch non_json status={result.get('status')} "
+                    f"cursor={last_cursor} body={snippet!r}; "
+                    "pagination_blocked=Douyin returned HTML instead of JSON, likely due to signed pagination parameters"
                 )
+                progress(message, seen)
+                print(message, file=sys.stderr, flush=True)
                 return 0
 
             has_more, max_cursor = payload_page_info(payload)
@@ -1014,21 +2417,21 @@ def collect_urls(
             if max_cursor is not None:
                 last_cursor = max_cursor
 
-            urls = extract_work_urls_from_payload(payload, sec_uid)
+            items = extract_work_items_from_payload(payload, sec_uid)
+            urls = set(items) or extract_work_urls_from_payload(payload, sec_uid)
             before = len(seen)
             seen.update(urls)
+            work_items.update(items)
             if urls:
                 api_hits += 1
                 last_api_url = next_url
             added = len(seen) - before
-            print(
-                (
-                    f"direct_page_fetch status={result.get('status')} extracted={len(urls)} "
-                    f"added={added} has_more={last_has_more} cursor={last_cursor}"
-                ),
-                file=sys.stderr,
-                flush=True,
+            message = (
+                f"direct_page_fetch status={result.get('status')} extracted={len(urls)} "
+                f"added={added} has_more={last_has_more} cursor={last_cursor}"
             )
+            progress(message, seen)
+            print(message, file=sys.stderr, flush=True)
             return added
 
         page.on("response", handle_response)
@@ -1037,15 +2440,13 @@ def collect_urls(
         close_popups(page)
 
         unchanged_rounds = 0
-        print(
-            (
-                f"scroll=000 found={len(seen)} added={len(seen)} "
-                f"api_pages={api_hits} has_more={last_has_more} cursor={last_cursor} "
-                f"api={display_api_path(last_api_url)}"
-            ),
-            file=sys.stderr,
-            flush=True,
+        message = (
+            f"scroll=000 found={len(seen)} added={len(seen)} "
+            f"api_pages={api_hits} has_more={last_has_more} cursor={last_cursor} "
+            f"api={display_api_path(last_api_url)}"
         )
+        progress(message, seen)
+        print(message, file=sys.stderr, flush=True)
 
         for index in range(1, max_scrolls + 1):
             before = len(seen)
@@ -1057,15 +2458,13 @@ def collect_urls(
             if added == 0 and truthy_has_more(last_has_more):
                 added = fetch_next_cursor()
 
-            print(
-                (
-                    f"scroll={index:03d} found={len(seen)} added={added} "
-                    f"api_pages={api_hits} has_more={last_has_more} cursor={last_cursor} "
-                    f"api={display_api_path(last_api_url)}"
-                ),
-                file=sys.stderr,
-                flush=True,
+            message = (
+                f"scroll={index:03d} found={len(seen)} added={added} "
+                f"api_pages={api_hits} has_more={last_has_more} cursor={last_cursor} "
+                f"api={display_api_path(last_api_url)}"
             )
+            progress(message, seen)
+            print(message, file=sys.stderr, flush=True)
 
             if target_count is not None and len(seen) >= target_count:
                 break
@@ -1076,6 +2475,15 @@ def collect_urls(
                 unchanged_rounds = 0
 
             if unchanged_rounds >= idle_rounds:
+                break
+
+            if pagination_blocked and unchanged_rounds >= 3:
+                message = (
+                    f"pagination_stopped found={len(seen)} reason=signed_next_page_blocked; "
+                    "try visible browser login/verification or a Douyin page context that can generate fresh pagination signatures"
+                )
+                progress(message, seen)
+                print(message, file=sys.stderr, flush=True)
                 break
 
         context.close()
@@ -1113,6 +2521,10 @@ def main() -> int:
     parser.add_argument(
         "--extension-interact",
         help="Send an interact command to the installed Chrome extension bridge",
+    )
+    parser.add_argument(
+        "--extension-collect",
+        help="Collect a Douyin creator homepage through the installed Chrome extension bridge",
     )
     parser.add_argument("--comment", help="Comment text for --interact")
     parser.add_argument("--like", action="store_true", help="Like the work for --interact")
@@ -1155,7 +2567,20 @@ def main() -> int:
         default=Path(".douyin-browser"),
         help="Browser profile directory. Reused so manual login can persist.",
     )
+    parser.add_argument("--web", action="store_true", help="Start the web interface")
+    parser.add_argument("--web-host", default="127.0.0.1", help="Host for --web")
+    parser.add_argument("--web-port", type=int, default=8003, help="Port for --web")
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=Path("cache"),
+        help="Directory for web downloads, URL lists, and browser profile",
+    )
     args = parser.parse_args()
+
+    if args.web:
+        run_web_server(args.web_host, args.web_port, args.cache_dir)
+        return 0
 
     if args.download:
         downloaded = download_work_media(
@@ -1214,6 +2639,39 @@ def main() -> int:
             timeout_seconds=args.bridge_timeout,
         )
         print_json(result)
+        return 0
+
+    if args.extension_collect:
+        result = run_extension_profile_collect(
+            args.extension_collect,
+            max_scrolls=args.max_scrolls,
+            target_count=args.target_count,
+            wait_seconds=args.wait,
+            port=args.bridge_port,
+            timeout_seconds=max(args.bridge_timeout, args.max_scrolls * max(args.wait, 0.5) + 45),
+        )
+        if not result.get("ok"):
+            print_json(result)
+            return 1
+
+        urls = result.get("urls") or []
+        if args.output:
+            output = Path(args.output)
+            if output.suffix.lower() == ".json":
+                payload = {
+                    "urls": urls,
+                    "items": result.get("items") or [],
+                    "responses": result.get("responses") or [],
+                }
+                output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            else:
+                output.write_text("\n".join(urls) + ("\n" if urls else ""), encoding="utf-8")
+
+        for url in urls:
+            print(url)
+        print(f"\nTotal: {len(urls)}", file=sys.stderr)
+        if result.get("version_warning"):
+            print(result["version_warning"], file=sys.stderr)
         return 0
 
     if not args.homepage_url:

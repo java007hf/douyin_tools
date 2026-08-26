@@ -1,16 +1,108 @@
 (function () {
-  const VERSION = "0.3.9";
+  const VERSION = "0.4.0";
   if (window.__douyinToolsVersion === VERSION) return;
   window.__douyinToolsInjected = true;
   window.__douyinToolsVersion = VERSION;
 
   const state = {
     captured: [],
-    lastCommentListUrl: null
+    lastCommentListUrl: null,
+    profileItems: new Map(),
+    profileResponses: []
   };
 
   function isInteresting(url) {
     return /\/aweme\/v1\/web\/(comment|commit|aweme\/favorite|aweme\/collect)/.test(url);
+  }
+
+  function isProfilePostUrl(url) {
+    return /\/aweme\/v1\/web\/aweme\/post\//.test(url);
+  }
+
+  function firstUrl(value) {
+    if (typeof value === "string" && /^https?:\/\//.test(value)) return value;
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const found = firstUrl(item);
+        if (found) return found;
+      }
+    }
+    if (value && typeof value === "object") {
+      for (const key of ["url_list", "urlList", "urls"]) {
+        const found = firstUrl(value[key]);
+        if (found) return found;
+      }
+    }
+    return "";
+  }
+
+  function workUrlFromAweme(item) {
+    const awemeId = item?.aweme_id || item?.awemeId || item?.id;
+    if (!awemeId) return "";
+    const isNote = item.aweme_type === 68 || Array.isArray(item.images) || Array.isArray(item.image_infos);
+    return `https://www.douyin.com/${isNote ? "note" : "video"}/${awemeId}`;
+  }
+
+  function titleFromAweme(item) {
+    return item?.desc || item?.caption || item?.title ||
+      item?.share_info?.share_title || item?.shareInfo?.shareTitle ||
+      workUrlFromAweme(item) || "未命名作品";
+  }
+
+  function coverFromAweme(item) {
+    const imagePostInfo = item?.image_post_info || item?.imagePostInfo || {};
+    const imageGroups = [
+      item?.images,
+      item?.image_infos,
+      item?.imageInfos,
+      imagePostInfo.images,
+      imagePostInfo.image_infos,
+      imagePostInfo.imageInfos
+    ];
+    for (const images of imageGroups) {
+      if (!Array.isArray(images)) continue;
+      for (const image of images) {
+        for (const key of [
+          "url_list", "urlList", "display_image", "displayImage",
+          "origin_cover", "originCover", "origin_image", "originImage",
+          "thumbnail", "thumbnail_image", "thumbnailImage"
+        ]) {
+          const found = firstUrl(image?.[key]);
+          if (found) return found;
+        }
+      }
+    }
+
+    const video = item?.video || {};
+    for (const key of ["cover", "origin_cover", "originCover", "dynamic_cover", "dynamicCover"]) {
+      const found = firstUrl(video[key]);
+      if (found) return found;
+    }
+    return "";
+  }
+
+  function rememberProfilePayload(url, payload) {
+    if (!payload || !Array.isArray(payload.aweme_list)) return;
+    const response = {
+      time: new Date().toISOString(),
+      url,
+      count: payload.aweme_list.length,
+      hasMore: payload.has_more ?? payload.hasMore ?? null,
+      maxCursor: payload.max_cursor ?? payload.maxCursor ?? null
+    };
+    state.profileResponses.unshift(response);
+    state.profileResponses = state.profileResponses.slice(0, 30);
+
+    for (const aweme of payload.aweme_list) {
+      const url = workUrlFromAweme(aweme);
+      if (!url) continue;
+      state.profileItems.set(url, {
+        url,
+        title: titleFromAweme(aweme),
+        cover: coverFromAweme(aweme),
+        type: url.includes("/note/") ? "图文" : "视频"
+      });
+    }
   }
 
   function remember(url, method, body) {
@@ -32,7 +124,13 @@
     const method = args[1]?.method || "GET";
     const body = args[1]?.body || null;
     if (url) remember(url, method, body);
-    return originalFetch.apply(this, args);
+    const response = await originalFetch.apply(this, args);
+    if (url && isProfilePostUrl(url)) {
+      response.clone().json()
+        .then((payload) => rememberProfilePayload(url, payload))
+        .catch(() => {});
+    }
+    return response;
   };
 
   const originalOpen = XMLHttpRequest.prototype.open;
@@ -45,6 +143,14 @@
   XMLHttpRequest.prototype.send = function (body) {
     if (this.__douyinToolsUrl) {
       remember(this.__douyinToolsUrl, this.__douyinToolsMethod || "GET", body);
+      this.addEventListener("load", () => {
+        if (!isProfilePostUrl(this.__douyinToolsUrl)) return;
+        try {
+          rememberProfilePayload(this.__douyinToolsUrl, JSON.parse(this.responseText));
+        } catch (_) {
+          // Ignore non-JSON XHR payloads.
+        }
+      });
     }
     return originalSend.call(this, body);
   };
@@ -526,6 +632,76 @@
     };
   }
 
+  function profileItemsResult() {
+    return Array.from(state.profileItems.values());
+  }
+
+  function scrollProfileContainers() {
+    const scrollables = Array.from(document.querySelectorAll("*"))
+      .filter((el) => el.scrollHeight > el.clientHeight + 50)
+      .map((el) => ({
+        el,
+        overflowY: getComputedStyle(el).overflowY,
+        range: el.scrollHeight - el.clientHeight
+      }))
+      .filter((item) => item.range > 200)
+      .sort((a, b) => b.range - a.range)
+      .slice(0, 8);
+
+    window.dispatchEvent(new WheelEvent("wheel", { deltaY: 2200, bubbles: true, cancelable: true }));
+    window.scrollTo(0, document.documentElement.scrollHeight);
+
+    for (const { el } of scrollables) {
+      el.dispatchEvent(new WheelEvent("wheel", { deltaY: 2200, bubbles: true, cancelable: true }));
+      el.scrollTop = Math.min(el.scrollTop + 2200, el.scrollHeight);
+      el.dispatchEvent(new Event("scroll", { bubbles: true }));
+    }
+  }
+
+  async function collectProfile(options) {
+    const maxScrolls = Math.max(1, Number(options.maxScrolls || 80));
+    const targetCount = Number(options.targetCount || 0);
+    const waitMs = Math.max(500, Number(options.waitMs || 1600));
+    const startedAt = Date.now();
+    let unchanged = 0;
+    let lastCount = profileItemsResult().length;
+
+    if (targetCount && lastCount >= targetCount) {
+      return {
+        version: VERSION,
+        href: location.href,
+        elapsedMs: Date.now() - startedAt,
+        items: profileItemsResult(),
+        responses: state.profileResponses,
+        capturedPages: state.profileResponses.length
+      };
+    }
+
+    for (let index = 0; index < maxScrolls; index += 1) {
+      scrollProfileContainers();
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+
+      const count = profileItemsResult().length;
+      if (targetCount && count >= targetCount) break;
+      if (count === lastCount) {
+        unchanged += 1;
+      } else {
+        unchanged = 0;
+        lastCount = count;
+      }
+      if (unchanged >= 12) break;
+    }
+
+    return {
+      version: VERSION,
+      href: location.href,
+      elapsedMs: Date.now() - startedAt,
+      items: profileItemsResult(),
+      responses: state.profileResponses,
+      capturedPages: state.profileResponses.length
+    };
+  }
+
   window.addEventListener("message", async (event) => {
     if (event.source !== window) return;
     const message = event.data;
@@ -546,6 +722,12 @@
 
       if (message.action === "interactV3") {
         const data = await interact(message);
+        window.postMessage({ id: message.id, source: "douyin-tools-page", ok: true, data }, "*");
+        return;
+      }
+
+      if (message.action === "collectProfile") {
+        const data = await collectProfile(message);
         window.postMessage({ id: message.id, source: "douyin-tools-page", ok: true, data }, "*");
       }
     } catch (error) {

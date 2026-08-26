@@ -32,7 +32,7 @@ For comment, like, and favorite features, avoid bulk execution during tests. Use
 
 Prefer `--extension-interact` for real interaction tests. It uses the installed Chrome extension and the logged-in Douyin page context. The older `--api-interact` path is useful for diagnostics but is less stable because Douyin may require page runtime parameters such as `msToken`, `a_bogus`, and `verifyFp`.
 
-Current verified Chrome extension version: `0.3.9`.
+Current verified Chrome extension version: `0.4.0`.
 
 When changing extension bridge behavior, update all matching version references together:
 

@@ -1,5 +1,5 @@
 function douyinToolsContentMain() {
-  const CONTENT_VERSION = "0.3.9";
+  const CONTENT_VERSION = "0.4.0";
 
   function injectPageScript() {
     const parent = document.documentElement || document.head || document.body;
@@ -52,7 +52,7 @@ function douyinToolsContentMain() {
         error: "Timed out waiting for page response"
       });
       pending.delete(id);
-    }, 30000);
+    }, Number(message.timeoutMs || 30000));
 
     return true;
   });

@@ -92,7 +92,7 @@ python douyin_work_urls.py --download "作品地址" --download-dir cache\downlo
 3. 打开“开发者模式”。
 4. 点击“加载已解压的扩展程序”。
 5. 选择本项目的 `chrome_extension` 目录。
-6. 确认扩展版本是 `0.3.9`；代码更新后需要在扩展页点击“重新加载”。
+6. 确认扩展版本是 `0.4.0`；代码更新后需要在扩展页点击“重新加载”。
 
 执行评论、点赞、收藏：
 
@@ -121,7 +121,7 @@ python analyze_extension_result.py cache\extension_result.json
 成功结果应重点看这些字段：
 
 ```text
-version: 0.3.9
+version: 0.4.0
 readiness.reason: captured-comment-list
 ACTION like     success: true
 ACTION favorite success: true
@@ -144,7 +144,7 @@ ACTION comment  success: true，并且 comment_id 不为空
 评论: /aweme/v1/web/comment/publish/
 ```
 
-注意：旧的 `/aweme/v1/web/aweme/favorite/` 在当前页面里可能返回收藏列表，不是可靠的收藏动作接口；扩展版本 `0.3.9` 已改用 `collect`。
+注意：旧的 `/aweme/v1/web/aweme/favorite/` 在当前页面里可能返回收藏列表，不是可靠的收藏动作接口；扩展版本 `0.4.0` 已改用 `collect`。
 
 ## 其他互动方式
 
@@ -161,6 +161,31 @@ python douyin_work_urls.py --api-interact "作品地址" --comment "评论内容
 ```
 
 一般优先使用 `--extension-interact`。
+
+## 网站部署
+
+启动本地网站：
+
+```powershell
+python douyin_work_urls.py --web --web-host 0.0.0.0 --web-port 8003
+```
+
+访问方打开：
+
+```text
+http://服务器IP:8003
+```
+
+当前网站里的单作品下载仍由服务器上的 Python/Playwright 完成；博主主页列表拉取改用服务器 Chrome 扩展桥接完成。也就是说，如果部署到一台服务器并统一使用服务器上的抖音登录态：
+
+- 服务器需要安装 Chrome。
+- 服务器 Chrome 需要加载本项目的 `chrome_extension/` 扩展，并保持版本为 `0.4.0`。
+- 服务器 Chrome 需要保持可用的抖音登录态；如果遇到验证码或风控，需要在服务器 Chrome 上处理。
+- 用户侧只需要打开 `http://服务器IP:8003`，不需要安装 Chrome 扩展。
+
+网页端采集只需要填写“目标数量”。滚动次数和等待时间由服务端自动控制，达到目标数量后立即停止；不填写目标数量时使用默认滚动上限继续采集。命令行模式仍保留 `--max-scrolls`、`--wait` 等参数供高级场景使用。
+
+如果希望每个用户使用自己的抖音账号和自己的浏览器上下文，则扩展需要安装在用户自己的 Chrome 里。
 
 ## 常用参数
 
@@ -179,6 +204,7 @@ python douyin_work_urls.py --api-interact "作品地址" --comment "评论内容
 --interact            通过页面自动化执行互动
 --api-interact        通过直接 Web API 执行互动
 --extension-interact  通过已安装 Chrome 扩展桥接执行互动
+--extension-collect   通过已安装 Chrome 扩展桥接拉取博主主页作品列表
 --comment             互动时发布的评论文本
 --like                互动时点赞作品
 --favorite            互动时收藏作品
