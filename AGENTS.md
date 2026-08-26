@@ -32,16 +32,7 @@ For comment, like, and favorite features, avoid bulk execution during tests. Use
 
 Prefer `--extension-interact` for real interaction tests. It uses the installed Chrome extension and the logged-in Douyin page context. The older `--api-interact` path is useful for diagnostics but is less stable because Douyin may require page runtime parameters such as `msToken`, `a_bogus`, and `verifyFp`.
 
-The Chrome extension version is defined only in `services/douyin/chrome_extension/manifest.json`; Python and JavaScript read it at runtime.
-
-When changing extension bridge behavior, update all matching version references together:
-
-- `services/douyin/chrome_extension/manifest.json`
-- `services/douyin/chrome_extension/background.js`
-- `services/douyin/chrome_extension/content.js`
-- `services/douyin/chrome_extension/injected.js`
-- `services/douyin/service.py` expected extension version warning
-- `README.md`
+The Chrome extension version is defined only in `services/douyin/chrome_extension/manifest.json`; Python and JavaScript read it at runtime. When changing extension bridge behavior, only update the manifest version and reload the extension.
 
 The currently verified interaction endpoints are:
 
@@ -66,3 +57,65 @@ node --check services\douyin\chrome_extension\popup.js
 ```
 
 If Python creates `__pycache__`, remove it before committing. `cache/` must remain ignored and uncommitted.
+
+## Video Workflow Architecture
+
+The video creation Tab uses a three-layer Workflow architecture. Keep the layers separate so new Workflows can be added without coupling business logic to HTTP handlers.
+
+`services/core/` is reserved for infrastructure shared by multiple Tabs. Workflow execution, Workflow models, Workflow context, and Workflow registration belong to `services/video_creator/workflow/`; `services/core/registry.py` is only the top-level Tab registry.
+
+```text
+services/
+  core/
+    ...                  # Cross-service infrastructure only
+  video_creator/
+    service.py           # HTTP API layer
+    workflow/
+      engine.py          # Workflow execution engine
+      context.py         # Runtime context and intermediate artifacts
+      registry.py        # Video Workflow registration
+      models.py          # Tasks, nodes, and statuses
+    workflows/
+      base.py
+      video_recreate.py  # Concrete Workflow implementations
+    tools/
+      video/
+        trim.py
+        extract_frames.py
+        merge.py
+      ai/
+        llm.py
+        video_understanding.py
+    schemas/
+      requests.py
+      responses.py
+```
+
+### Layer Responsibilities
+
+- Base tools provide one focused capability, such as video trimming, frame extraction, merging, audio processing, video understanding, or LLM calls. Tools must not depend on HTTP or a specific Workflow.
+- Workflows compose tools into an ordered process, including parameters, branching, intermediate artifacts, progress, retries, and failure handling. Each Workflow lives in its own module or directory.
+- The service layer validates input, creates Workflow tasks, exposes task status and logs, and returns artifacts or download URLs. HTTP handlers must not contain the actual media-processing logic.
+
+### Workflow Runtime Rules
+
+- Treat every execution as a task with a unique ID and explicit node statuses: `pending`, `running`, `success`, and `failed`.
+- Store intermediate outputs as named artifacts, such as video files, frame images, subtitles, analysis JSON, and generated media.
+- Keep all task files under a task-specific directory inside `cache/`, making cleanup and download boundaries explicit.
+- Record node progress, structured logs, errors, and retry information so long-running jobs are observable.
+- Wrap LLM and video-understanding integrations behind Provider interfaces, allowing models or vendors to change without rewriting Workflows.
+- A Workflow may be enabled, replaced, or deployed independently after registration in `video_creator/workflow/registry.py`.
+
+### Initial Video Recreation Workflow
+
+The first Workflow is expected to follow this shape, with generation and composition details added later:
+
+```text
+reference video upload
+  -> save task input
+  -> inspect basic video metadata
+  -> extract frames
+  -> understand video content
+  -> generate a structured recreation plan from the user brief
+  -> generate assets and compose the final video
+```
