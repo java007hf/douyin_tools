@@ -7,15 +7,17 @@ from urllib import parse, request
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from services.video_creator.tools.ai.comfyui_client import ComfyUIClient, ComfyUIError
 from services.video_creator.tools.ai.config_store import ProviderConfigStore
-from services.video_creator.tools.ai.providers import MiniMaxVideoProvider, SeedanceProvider
+from services.video_creator.tools.ai.providers import MiniMaxImageProvider, MiniMaxVideoProvider, ProviderError, SeedreamImageProvider, SeedanceProvider
 from services.video_creator.tools.video.extract_frames import extract_frames
 from services.video_creator.workflow.generation import bind_media, flux_image, video_workflow
 
 
 def model_catalog(comfy_url: str) -> dict[str, list[str]]:
     models = {
-        "minimax": ["MiniMax-Hailuo-2.3", "MiniMax-Hailuo-2.3-Fast", "MiniMax-Hailuo-02"],
-        "seedance": ["doubao-seedance-1-0-pro-250528", "doubao-seedance-1-5-pro-251215", "doubao-seedance-2-0-pro", "doubao-seedance-2-0-fast"],
+        "minimax_image": ["image-01", "image-01-live"],
+        "minimax_video": ["MiniMax-H3", "MiniMax-H3-Max"],
+        "seedance_image": ["doubao-seedream-5-0-260128", "doubao-seedream-5-0-lite-260128", "doubao-seedream-4-5-251128", "doubao-seedream-4-0-250828"],
+        "seedance_video": ["doubao-seedance-2-0-pro", "doubao-seedance-2-0-fast", "doubao-seedance-2-0-mini", "doubao-seedance-1-5-pro-251215", "doubao-seedance-1-0-pro-250528"],
         "comfy": [],
     }
     try:
@@ -119,7 +121,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         if image and not params.get("image_url"): raise ValueError("云端参考图需要先配置可访问的 image_url")
                         if video and not params.get("video_url"): raise ValueError("云端参考视频需要先配置可访问的 video_url")
                         selected_model = params.get("model") or config.get("model", "")
-                        cloud = MiniMaxVideoProvider(config.get("base_url", "https://api.minimaxi.com"), api_key, 60) if config.get("provider") == "minimax" else SeedanceProvider(config.get("base_url", "https://ark.cn-beijing.volces.com/api/v3"), api_key, selected_model, 60)
+                        if kind == "image":
+                            if config.get("provider") == "minimax":
+                                urls = MiniMaxImageProvider("https://api.minimaxi.com", api_key, 60).generate(prompt, image_url=params.get("image_url"), model=selected_model, aspect=params.get("aspect", "1:1"), count=params.get("count", "1"))
+                            elif config.get("provider") == "seedance":
+                                urls = SeedreamImageProvider("https://ark.cn-beijing.volces.com/api/v3", api_key, 60).generate(prompt, image=image, model=selected_model, aspect=params.get("aspect", "1:1"), resolution=params.get("resolution", "2K"))
+                            else: raise ProviderError("当前 Provider 不支持生图")
+                            self.server.jobs.update(job,status="done",message="生图完成",progress=100,outputs=[{"type":"image","href":url} for url in urls]); return
+                        cloud = MiniMaxVideoProvider("https://api.minimaxi.com", api_key, 60) if config.get("provider") == "minimax" else SeedanceProvider("https://ark.cn-beijing.volces.com/api/v3", api_key, selected_model, 60)
                         task_id = cloud.submit(prompt, image=image, video=video, model=selected_model, image_url=params.get("image_url"), video_url=params.get("video_url"), resolution=params.get("resolution", "768P")); self.server.jobs.update(job,message="云端已接收任务",progress=15,provider_task_id=task_id); result=cloud.wait(task_id); remote=cloud.download_url(result)
                         if not remote: raise ValueError("云端任务完成但没有返回视频地址")
                         self.server.jobs.update(job,status="done",message="生成完成",progress=100,outputs=[{"type":"video","href":remote}]); return

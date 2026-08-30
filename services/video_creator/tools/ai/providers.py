@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import base64
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -57,12 +58,14 @@ class JsonProvider(VideoProvider):
 
 
 class MiniMaxVideoProvider(JsonProvider):
-    """MiniMax video generation API, including text and first-frame image modes."""
+    """MiniMax H3 V2 multimodal video generation API."""
     def submit(self, prompt: str, *, image: Path | None = None, video: Path | None = None, **params) -> str:
-        if video: raise ProviderError("MiniMax public video API adapter currently supports text and reference image modes; video reference needs a provider-specific API")
-        payload = {"prompt": prompt, "model": params.get("model", "MiniMax-Hailuo-2.3"), "duration": int(params.get("duration", 6)), "resolution": params.get("resolution", "768P")}
-        if image: payload["first_frame_image"] = params.get("image_url") or self._require_url(image)
-        result = self.call("/v1/video_generation", payload)
+        content = [{"type": "text", "text": prompt}]
+        if image: content.append({"type": "image_url", "image_url": {"url": params.get("image_url") or self._require_url(image), "role": "reference_image"}})
+        if video: content.append({"type": "video_url", "video_url": {"url": params.get("video_url") or self._require_url(video), "role": "reference_video"}})
+        resolution = {"360p": "768P", "720p": "768P", "1080p": "2K"}.get(str(params.get("resolution", "768P")), params.get("resolution", "768P"))
+        payload = {"model": params.get("model") or "MiniMax-H3", "content": content, "resolution": resolution, "duration": int(params.get("duration", 6)), "ratio": params.get("aspect", "16:9")}
+        result = self.call("/v2/video_generation", payload)
         task_id = result.get("task_id")
         if not task_id: raise ProviderError(f"MiniMax did not return task_id: {result}")
         return str(task_id)
@@ -70,11 +73,55 @@ class MiniMaxVideoProvider(JsonProvider):
         raise ProviderError(f"MiniMax requires a public image URL for this request: {path.name}")
     def status(self, task_id: str) -> dict: return self.call("/v1/query/video_generation?" + parse.urlencode({"task_id": task_id}), method="GET")
     def download_url(self, task: dict) -> str | None:
+        task = task.get("task", task)
+        if task.get("content", {}).get("url"): return task["content"]["url"]
         file_id = task.get("file_id")
         if not file_id: return task.get("video_url")
         result = self.call("/v1/files/retrieve?" + parse.urlencode({"file_id": file_id}), method="GET")
         return result.get("file", {}).get("download_url") or result.get("file", {}).get("download_url")
     def cancel(self, task_id: str) -> None: self.call("/v1/delete_video_generation", {"task_id": task_id})
+
+
+class MiniMaxImageProvider(JsonProvider):
+    """MiniMax image generation API for text-to-image and subject reference."""
+    def generate(self, prompt: str, *, image_url: str | None = None, **params) -> list[str]:
+        payload = {
+            "model": params.get("model") or "image-01",
+            "prompt": prompt,
+            "aspect_ratio": params.get("aspect", "1:1"),
+            "response_format": "url",
+            "n": max(1, min(9, int(params.get("count", 1) or 1))),
+        }
+        if image_url:
+            payload["subject_reference"] = [{"type": "character", "image_file": image_url}]
+        result = self.call("/v1/image_generation", payload)
+        urls = result.get("data", {}).get("image_urls", [])
+        if not urls: raise ProviderError(f"MiniMax did not return image URLs: {result}")
+        return [str(url) for url in urls]
+
+
+class SeedreamImageProvider(JsonProvider):
+    """Volcengine Ark Seedream image generation API."""
+    def generate(self, prompt: str, *, image: Path | None = None, **params) -> list[str]:
+        size = str(params.get("resolution", "2K"))
+        base = {"1K": 1024, "2K": 2048, "4K": 4096}.get(size, 2048)
+        ratio = {"1:1": (1, 1), "16:9": (16, 9), "9:16": (9, 16), "4:3": (4, 3), "3:4": (3, 4), "3:2": (3, 2), "2:3": (2, 3)}.get(params.get("aspect", "1:1"), (1, 1))
+        width = int(base * ratio[0] / max(ratio)); height = int(base * ratio[1] / max(ratio))
+        payload = {
+            "model": params.get("model") or "doubao-seedream-5-0-260128",
+            "prompt": prompt,
+            "size": f"{width}x{height}",
+            "response_format": "url",
+            "sequential_image_generation": "disabled",
+            "watermark": False,
+        }
+        if image:
+            encoded = base64.b64encode(image.read_bytes()).decode("ascii")
+            payload["image"] = [f"data:{mimetypes.guess_type(image.name)[0] or 'image/png'};base64,{encoded}"]
+        result = self.call("/images/generations", payload)
+        urls = [item.get("url") for item in result.get("data", []) if item.get("url")]
+        if not urls: raise ProviderError(f"Seedream did not return image URLs: {result}")
+        return [str(url) for url in urls]
 
 
 class SeedanceProvider(JsonProvider):
