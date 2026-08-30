@@ -13,17 +13,19 @@ class Tab:
     service: str
     port: int
     enabled: bool = True
+    admin_only: bool = False
 
 
 TABS = (
     Tab("douyin", "抖音工具", "拉取、下载和预览抖音素材", "douyin", 8101),
-    Tab("video-creator", "视频创作", "参考视频复刻工作流", "video_creator", 8102),
+    Tab("video-creator", "AI创作工具", "参考视频复刻工作流", "video_creator", 8102),
+    Tab("admin", "后台控制", "模型与云端 Provider 配置", "admin", 8103, admin_only=True),
 )
 
 
-def public_tabs(host: str) -> list[dict[str, object]]:
+def public_tabs(host: str, include_admin: bool = False) -> list[dict[str, object]]:
     return [
         {**asdict(tab), "url": f"http://{host}:{tab.port}/"}
         for tab in TABS
-        if tab.enabled
+        if tab.enabled and (include_admin or not tab.admin_only)
     ]

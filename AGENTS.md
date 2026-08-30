@@ -119,3 +119,58 @@ reference video upload
   -> generate a structured recreation plan from the user brief
   -> generate assets and compose the final video
 ```
+
+## ComfyUI Integration
+
+The video creator service integrates with a local ComfyUI instance through its HTTP API. Set `COMFYUI_URL` when ComfyUI is not on `http://127.0.0.1:8188`. Image generation currently uses the installed Flux workflow; `qwen` and `sd` are exposed in the UI but require corresponding models/workflows. Video generation selects `t2v`, `i2v`, or `r2v` from the supplied reference media. Configure API-format workflows with `COMFYUI_T2V_WORKFLOW`, `COMFYUI_I2V_WORKFLOW`, and `COMFYUI_R2V_WORKFLOW`.
+
+## Current Todo Tracking
+
+The canonical task details are in `todo.md`. Keep the checklist below synchronized with that file. When a task is completed, mark it as `[x]` in both files in the same change.
+
+### Reference-Media Recreation
+
+- [x] Prepare and save the supplied reference video for recreation testing.
+- [x] Validate I2V recreation with a reference image.
+- [x] Validate R2V recreation with a reference video.
+- [x] Compare T2V, I2V, and R2V outputs and failure messages.
+- [x] Record real workflow validation inputs, durations, outputs, and failures under `cache/`.
+- [ ] Tune prompt templates, reference strength, resolution, frame count, and timeout behavior.
+
+### ComfyUI Workflows
+
+- [ ] Convert and save API-format T2V, I2V, and R2V workflows.
+- [ ] Bind prompt, size, aspect ratio, frame count, sampler settings, and seed.
+- [ ] Validate progress, cancellation, timeout, retry, and download behavior.
+- [ ] Add workflow version and model dependency checks.
+
+### Cloud Providers
+
+- [ ] Define a unified cloud model Provider interface.
+- [ ] Integrate the H3 Provider.
+- [ ] Integrate the Seedance Provider.
+- [ ] Add environment-based secret configuration and redacted logging.
+- [ ] Add rate limiting, retries, idempotency, and timeout handling.
+- [ ] Show local/cloud provider selection in the creation page and use the same asset Feed.
+- [ ] Record provider model version, request ID, duration, and billing metadata when available.
+
+### Tests And Documentation
+
+- [ ] Add ComfyUI workflow validation and API tests.
+- [ ] Add mocked H3 and Seedance Provider tests.
+- [ ] Update `README.md` with local model and cloud API deployment instructions.
+- [ ] Keep this checklist and `todo.md` synchronized after each completed task.
+
+## Current Web Controls
+
+The unified web app exposes three tabs in this order: Douyin Tool, AI Creation Tool, and Admin. The AI Creation Tool contains the `视频抽帧`, `生图`, and `生视频` views. Image/video generation parameters such as model, aspect ratio, and resolution belong to the generation form, not provider configuration.
+
+The Admin tab is enabled by default and runs on port `8103`. Provider configuration only stores connection parameters for MiniMax and Seedance; credentials are redacted as `********` in public responses and empty credential fields preserve the stored value. The gateway defaults to `0.0.0.0` for LAN access. Use `run.bat` for the standard Windows startup, or `--no-admin` when a public-only gateway is required.
+
+### Visual Model Configuration
+
+- [ ] Reference the `C:\workspace\xiaozhi-esp32-server-benyl` console model settings and implement a visual model/Provider configuration page.
+- [ ] Support H3 and Seedance cloud settings such as API URL, Token, API Key, model version, and defaults.
+- [ ] Mask and securely store credentials; never expose them in frontend or ordinary task logs.
+- [ ] Add configuration validation, connection testing, enable/disable, default model selection, and effective-state feedback.
+- [ ] Keep model configuration separate from generation tasks; tasks reference a Provider configuration ID instead of storing secrets.

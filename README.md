@@ -1,5 +1,15 @@
 # Douyin Tools
 
+## 第三方依赖记录
+
+| 依赖 | 用途 | 安装方式 | 验证 |
+| --- | --- | --- | --- |
+| Python `opencv-python-headless` | 视频读取、抽帧和图片写入 | `pip install -r requirements.txt` | `python -c "import cv2; print(cv2.__version__)"` |
+| FFmpeg | 视频裁剪、音视频封装、保留参考视频音频 | Windows 使用 `winget install --id Gyan.FFmpeg.Shared --exact` | `ffmpeg -version` |
+| Playwright Chromium | 抖音页面采集和下载相关浏览器能力 | `python -m playwright install chromium` | `python -m playwright --version` |
+
+FFmpeg 安装后如果当前终端找不到 `ffmpeg`，请重新打开 PowerShell，使系统 PATH 生效。当前开发机安装位置由包管理器维护，不提交到仓库。
+
 这个项目提供一个 Python 命令行工具，用来处理抖音 Web 页面上的作品数据：
 
 - 输入博主主页地址，获取当前博主自己的作品地址列表。
@@ -164,11 +174,27 @@ python services/douyin/service.py --api-interact "作品地址" --comment "评�
 
 ## 网站部署
 
+### ComfyUI 生图/生视频
+
+视频创作 Tab 默认连接本机 `http://127.0.0.1:8188`，可通过环境变量配置 ComfyUI 和视频工作流：
+
+```powershell
+$env:COMFYUI_URL="http://127.0.0.1:8188"
+$env:COMFYUI_T2V_WORKFLOW="C:\workflows\t2v_api.json"
+$env:COMFYUI_I2V_WORKFLOW="C:\workflows\i2v_api.json"
+$env:COMFYUI_R2V_WORKFLOW="C:\workflows\r2v_api.json"
+python web_app.py --host 0.0.0.0 --port 8003 --service-host 0.0.0.0
+```
+
+工作流文件应使用 ComfyUI API 格式，并包含 `LoadImage`/`LoadVideo` 节点。图片无参考图时走文生图，有参考图时走图生图；视频按参考素材自动选择 T2V、I2V 或 R2V。每次提交立即进入生成资产 Feed，卡片会展示 prompt、参考文件、参数及排队/执行/完成/失败状态。
+
 启动统一前端和全部 Tab 服务：
 
 ```powershell
 python web_app.py --host 0.0.0.0 --port 8003 --service-host 0.0.0.0
 ```
+
+Windows 也可以直接双击项目根目录的 `run.bat` 启动全部服务。
 
 访问方打开：
 
@@ -176,11 +202,22 @@ python web_app.py --host 0.0.0.0 --port 8003 --service-host 0.0.0.0
 http://服务器IP:8003
 ```
 
+后台控制台（仅管理员使用）访问：
+
+```text
+http://服务器IP:8003/?admin=1
+```
+
+视频创作页面按“视频抽帧 / 生图 / 生视频”切换功能。模型下拉选项包含 ComfyUI 当前已安装模型，以及 MiniMax、Seedance 的云端模型；MiniMax 和 Seedance 在后台控制台中分别配置，普通入口不会显示后台控制 Tab。
+
+后台控制台只填写连接所需的 API 地址、API Key 和 Token，MiniMax、Seedance 的 API 地址会预填默认值。配置保存到 `cache/video_creator/provider_configs.json`；再次打开时会回填配置，敏感字段仅显示为 `********`，留空保存不会覆盖已有凭据。模型版本和比例等生成参数在 AI 创作工具中选择。
+
 网站由一个统一前端和多个独立 Tab 服务组成：
 
 - `web_app.py`：统一前端和 Tab 注册入口，默认端口 `8003`。
 - `services/douyin/service.py`：抖音工具服务，默认端口 `8101`。
 - `services/video_creator/service.py`：视频创作服务，默认端口 `8102`，当前提供输入和任务契约占位页面。
+- `services/admin/service.py`：后台控制服务，默认端口 `8103`，独立管理 MiniMax、Seedance 和 ComfyUI 模型配置。
 
 每个 Tab 都有独立端口，可以单独启动、替换或部署；统一前端通过 `services/core/registry.py` 读取 Tab 配置。服务器部署时：
 

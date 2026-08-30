@@ -28,7 +28,7 @@ class FrontendHandler(http.server.BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         if path == "/api/tabs":
             host = self.headers.get("host", "127.0.0.1:8003").split(":", 1)[0]
-            body = __import__("json").dumps({"tabs": public_tabs(host)}, ensure_ascii=False).encode("utf-8")
+            body = __import__("json").dumps({"tabs": public_tabs(host, getattr(self.server, "include_admin", True))}, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.send_header("content-type", "application/json; charset=utf-8")
             self.send_header("content-length", str(len(body)))
@@ -67,22 +67,25 @@ def start_services(args: argparse.Namespace) -> list[subprocess.Popen[bytes]]:
     commands = [
         [sys.executable, str(ROOT / "services" / "douyin" / "service.py"), "--web", "--web-host", service_host, "--web-port", str(args.douyin_port), "--cache-dir", str(cache_dir / "douyin")],
         [sys.executable, str(ROOT / "services" / "video_creator" / "service.py"), "--host", service_host, "--port", str(args.video_port)],
+        [sys.executable, str(ROOT / "services" / "admin" / "service.py"), "--host", service_host, "--port", "8103", "--cache-dir", str(cache_dir / "video_creator")],
     ]
     return [subprocess.Popen(command, cwd=ROOT) for command in commands]
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Unified tab frontend")
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8003)
-    parser.add_argument("--service-host", default="127.0.0.1")
+    parser.add_argument("--service-host", default="0.0.0.0")
     parser.add_argument("--douyin-port", type=int, default=8101)
     parser.add_argument("--video-port", type=int, default=8102)
     parser.add_argument("--cache-dir", type=Path, default=Path("cache"))
+    parser.add_argument("--no-admin", action="store_true", help="Hide the private admin tab")
     parser.add_argument("--no-start-services", action="store_true", help="Use separately started tab services")
     args = parser.parse_args()
     children = [] if args.no_start_services else start_services(args)
     server = http.server.ThreadingHTTPServer((args.host, args.port), FrontendHandler)
+    server.include_admin = not args.no_admin
     print(f"frontend listening=http://{args.host}:{args.port}", flush=True)
     try:
         server.serve_forever()

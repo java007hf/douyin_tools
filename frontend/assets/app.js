@@ -24,7 +24,9 @@ function activate(tab) {
 
 async function boot() {
   try {
-    const response = await fetch('/api/tabs');
+    const endpoint = new URL('/api/tabs', window.location.origin);
+    endpoint.search = window.location.search.replace(/^\?/, '');
+    const response = await fetch(endpoint);
     if (!response.ok) throw new Error('Tab 配置加载失败');
     tabData = (await response.json()).tabs || [];
     tabs.replaceChildren();
