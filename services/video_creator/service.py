@@ -238,7 +238,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         model=params["model"] or "flux"
                         if model=="sd": raise ValueError("当前 ComfyUI 未安装 Stable Diffusion checkpoint，暂不能使用 sd")
                         if model=="qwen": raise ValueError("Qwen Image 请在模型列表中选择 qwen_image_fp8_e4m3fn.safetensors")
-                        width=max(16,int(params["width"] or 1024)); height=max(16,int(params["height"] or 1024)); count=max(1,min(8,int(params["count"] or 1))); seed=uuid.uuid4().int % (2**31)
+                        if model == "qwen_image_fp8_e4m3fn.safetensors" and not params["width"] and not params["height"]:
+                            qwen_sizes={"1:1":(1328,1328),"16:9":(1664,928),"9:16":(928,1664),"4:3":(1472,1104),"3:4":(1104,1472),"3:2":(1584,1056),"2:3":(1056,1584)}
+                            width,height=qwen_sizes.get(params["aspect"],(1328,1328))
+                        else:
+                            width=max(16,int(params["width"] or 1024)); height=max(16,int(params["height"] or 1024))
+                        count=max(1,min(8,int(params["count"] or 1))); seed=uuid.uuid4().int % (2**31)
                         if model == "qwen_image_fp8_e4m3fn.safetensors": graph=qwen_image(prompt,width,height,count,seed)
                         elif model == "flux1-krea-dev_fp8_scaled.safetensors":
                             uploaded=comfy.upload(image) if image else None; graph=flux_image(prompt,params["negative"],width,height,count,seed,uploaded,model=model)
