@@ -275,3 +275,16 @@ cache\extension_result.json
 ```
 
 仓库根目录只保留程序、扩展源码和说明文档。
+## Cloudinary 参考素材上传
+
+云端 MiniMax 的参考图片/视频必须能被公网访问。项目支持使用 Cloudinary 的 unsigned upload preset：用户在 AI 创作工具中选择本地参考素材后，服务会先上传到 Cloudinary，再把返回的 `secure_url` 提交给云端模型。
+
+在启动项目的同一个 PowerShell 窗口中配置：
+
+```powershell
+$env:CLOUDINARY_CLOUD_NAME="你的 cloud name"
+$env:CLOUDINARY_UPLOAD_PRESET="你的 unsigned upload preset"
+.\run.bat
+```
+
+`CLOUDINARY_UPLOAD_PRESET` 需要在 Cloudinary 控制台中创建为 unsigned 类型。只把 Cloud Name 和 Upload Preset 暴露给浏览器，不要把 API Secret 放入前端或提交到代码库。

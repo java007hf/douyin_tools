@@ -1,6 +1,6 @@
 """API-format ComfyUI workflows for the generation tab.
 
-Image generation uses the installed Flux checkpoint. Video generation is routed
+Image generation supports the installed Flux and Qwen Image checkpoints. Video generation is routed
 to the matching user workflow template through the same API boundary; the
 template can be supplied via COMFYUI_*_WORKFLOW environment variables.
 """
@@ -22,9 +22,9 @@ def load_external(name: str) -> dict | None:
     return data.get("prompt", data)
 
 
-def flux_image(prompt: str, negative: str, width: int, height: int, count: int, seed: int, reference: str | None = None, denoise: float = 0.7) -> dict:
+def flux_image(prompt: str, negative: str, width: int, height: int, count: int, seed: int, reference: str | None = None, denoise: float = 0.7, model: str = "flux1-krea-dev_fp8_scaled.safetensors") -> dict:
     graph = {
-        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "flux1-krea-dev_fp8_scaled.safetensors", "weight_dtype": "default"}},
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": model, "weight_dtype": "default"}},
         "2": {"class_type": "DualCLIPLoader", "inputs": {"clip_name1": "clip_l.safetensors", "clip_name2": "t5xxl_fp8_e4m3fn_scaled.safetensors", "type": "flux"}},
         "3": {"class_type": "VAELoader", "inputs": {"vae_name": "ae.safetensors"}},
         "4": {"class_type": "CLIPTextEncodeFlux", "inputs": {"clip": ["2", 0], "clip_l": prompt, "t5xxl": prompt, "guidance": 3.5}},
@@ -40,6 +40,22 @@ def flux_image(prompt: str, negative: str, width: int, height: int, count: int, 
         graph["7"]["inputs"]["latent_image"] = ["11", 0]
         graph["7"]["inputs"]["denoise"] = max(0.05, min(1.0, denoise))
     return graph
+
+
+def qwen_image(prompt: str, width: int, height: int, count: int, seed: int) -> dict:
+    """Build the native Qwen-Image text-to-image graph."""
+    return {
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "qwen_image_fp8_e4m3fn.safetensors", "weight_dtype": "default"}},
+        "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors", "type": "qwen_image", "device": "default"}},
+        "3": {"class_type": "VAELoader", "inputs": {"vae_name": "qwen_image_vae.safetensors"}},
+        "4": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": prompt}},
+        "5": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": ""}},
+        "6": {"class_type": "EmptySD3LatentImage", "inputs": {"width": width, "height": height, "batch_size": count}},
+        "7": {"class_type": "ModelSamplingAuraFlow", "inputs": {"model": ["1", 0], "shift": 3.1}},
+        "8": {"class_type": "KSampler", "inputs": {"model": ["7", 0], "positive": ["4", 0], "negative": ["5", 0], "latent_image": ["6", 0], "seed": seed, "steps": 20, "cfg": 1.0, "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0}},
+        "9": {"class_type": "VAEDecode", "inputs": {"samples": ["8", 0], "vae": ["3", 0]}},
+        "10": {"class_type": "SaveImage", "inputs": {"filename_prefix": "douyin_creator/qwen_image", "images": ["9", 0]}},
+    }
 
 
 def video_workflow(kind: str, payload: dict) -> dict:

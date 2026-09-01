@@ -12,7 +12,7 @@ import time
 import uuid
 from abc import ABC, abstractmethod
 from pathlib import Path
-from urllib import parse, request
+from urllib import error as urlerror, parse, request
 
 
 class ProviderError(RuntimeError):
@@ -29,7 +29,7 @@ class VideoProvider(ABC):
     def cancel(self, task_id: str) -> None: raise ProviderError("Provider does not support cancellation")
 
 
-class JsonProvider(VideoProvider):
+class JsonProvider:
     def __init__(self, base_url: str, api_key: str, timeout: int = 60):
         self.base_url, self.api_key, self.timeout = base_url.rstrip("/"), api_key, timeout
     def call(self, path: str, payload=None, *, method="POST", headers=None, retries=2) -> dict:
@@ -40,6 +40,14 @@ class JsonProvider(VideoProvider):
             try:
                 with request.urlopen(request.Request(self.base_url + path, data=body, method=method, headers=merged), timeout=self.timeout) as response:
                     result = json.loads(response.read()); break
+            except urlerror.HTTPError as exc:
+                try:
+                    detail = exc.read().decode("utf-8", errors="replace")
+                except Exception:
+                    detail = ""
+                last_error = RuntimeError(f"HTTP {exc.code}: {detail[:1200]}")
+                if attempt == retries: raise ProviderError(f"Cloud provider request failed: {path}: {last_error}") from exc
+                time.sleep(2 ** attempt)
             except Exception as exc:
                 last_error = exc
                 if attempt == retries: raise ProviderError(f"Cloud provider request failed: {path}: {exc}") from exc
@@ -104,17 +112,19 @@ class SeedreamImageProvider(JsonProvider):
     """Volcengine Ark Seedream image generation API."""
     def generate(self, prompt: str, *, image: Path | None = None, **params) -> list[str]:
         size = str(params.get("resolution", "2K"))
-        base = {"1K": 1024, "2K": 2048, "4K": 4096}.get(size, 2048)
-        ratio = {"1:1": (1, 1), "16:9": (16, 9), "9:16": (9, 16), "4:3": (4, 3), "3:4": (3, 4), "3:2": (3, 2), "2:3": (2, 3)}.get(params.get("aspect", "1:1"), (1, 1))
-        width = int(base * ratio[0] / max(ratio)); height = int(base * ratio[1] / max(ratio))
+        if size not in {"1K", "2K", "4K"}:
+            size = "2K"
         payload = {
-            "model": params.get("model") or "doubao-seedream-5-0-260128",
+            "model": params.get("model") or "doubao-seedream-5-0-pro-260628",
             "prompt": prompt,
-            "size": f"{width}x{height}",
+            "size": size,
+            "stream": False,
             "response_format": "url",
-            "sequential_image_generation": "disabled",
             "watermark": False,
         }
+        model = str(payload["model"]).lower()
+        if any(name in model for name in ("seedream-5-0-lite", "seedream-4-5", "seedream-4-0")):
+            payload["sequential_image_generation"] = "disabled"
         if image:
             encoded = base64.b64encode(image.read_bytes()).decode("ascii")
             payload["image"] = [f"data:{mimetypes.guess_type(image.name)[0] or 'image/png'};base64,{encoded}"]

@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from services.video_creator.tools.ai.providers import MiniMaxVideoProvider, ProviderError, SeedanceProvider
+from services.video_creator.tools.ai.providers import MiniMaxVideoProvider, ProviderError, SeedanceProvider, SeedreamImageProvider
 
 
 class ProviderTests(unittest.TestCase):
@@ -17,6 +17,15 @@ class ProviderTests(unittest.TestCase):
         provider = SeedanceProvider("https://example.test", "key", "model")
         with patch.object(provider, "call", return_value={}):
             with self.assertRaises(ProviderError): provider.submit("hello")
+
+    def test_seedream_uses_documented_size_and_returns_urls(self):
+        provider = SeedreamImageProvider("https://example.test", "key")
+        with patch.object(provider, "call", return_value={"data": [{"url": "https://cdn.test/a.png"}]} ) as call:
+            urls = provider.generate("hello", model="doubao-seedream-4-0-250828", resolution="2K", aspect="16:9")
+        self.assertEqual(urls, ["https://cdn.test/a.png"])
+        payload = call.call_args.args[1]
+        self.assertEqual(payload["size"], "2K")
+        self.assertFalse(payload["stream"])
 
 
 if __name__ == "__main__": unittest.main()
