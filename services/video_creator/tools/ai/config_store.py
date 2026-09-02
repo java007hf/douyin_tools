@@ -22,7 +22,8 @@ class ProviderConfigStore:
             return next((x for x in self._read() if x.get("id") == provider_id), None)
     def get_by_provider(self, provider: str):
         with self.lock:
-            return next((x for x in self._read() if x.get("provider") == provider), None)
+            matches = [x for x in self._read() if x.get("provider") == provider]
+            return matches[-1] if matches else None
     def save(self, values: dict):
         allowed = {"name", "provider", "base_url", "model", "api_key", "token", "secret", "enabled", "defaults"}
         with self.lock:

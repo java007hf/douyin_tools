@@ -39,7 +39,7 @@ class ComfyUIClient:
             for key, value in node.get("inputs", {}).items():
                 if isinstance(value, str) and key.endswith("_name"):
                     choices = schema.get("required", {}).get(key, [[]])[0]
-                    if choices and value not in choices: raise ComfyUIError(f"ComfyUI 缺少模型或资源: {value}")
+                    if isinstance(choices, list) and choices and value not in choices: raise ComfyUIError(f"ComfyUI 缺少模型或资源: {value}")
 
     def upload(self, path: Path, subfolder: str = "douyin") -> str:
         boundary = uuid.uuid4().hex

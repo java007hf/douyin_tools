@@ -63,39 +63,56 @@ def video_workflow(kind: str, payload: dict) -> dict:
     workflow = load_external(env)
     if workflow is not None:
         return workflow
-    width = max(32, int(payload.get("width") or 768))
-    height = max(32, int(payload.get("height") or 768))
+    resolution = str(payload.get("resolution") or "360p").lower()
+    if payload.get("width") or payload.get("height"):
+        width = max(32, int(payload.get("width") or 768))
+        height = max(32, int(payload.get("height") or 768))
+    elif resolution in {"1080p", "1080"}:
+        width, height = 1920, 1088
+    elif resolution in {"720p", "720", "768p", "768"}:
+        # H3's 768P workflow uses the model's native 1344x768 canvas.
+        width, height = 1344, 768
+    else:
+        width, height = 768, 448
     aspect = str(payload.get("aspect") or "")
     if ":" in aspect:
         ratio_w, ratio_h = (float(x) for x in aspect.split(":", 1))
         if ratio_w > 0 and ratio_h > 0:
-            height = max(32, int(round(width * ratio_h / ratio_w / 32) * 32))
-    length = max(5, int(payload.get("frames") or 124))
+            if ratio_w >= ratio_h:
+                height = max(32, int(round(width * ratio_h / ratio_w / 32) * 32))
+            else:
+                height = width
+                width = max(32, int(round(height * ratio_w / ratio_h / 32) * 32))
+    length = max(5, int(payload.get("frames") or int(payload.get("duration") or 5) * 24))
     prompt = str(payload.get("prompt") or "")
+    video_model = str(payload.get("model") or "")
+    if video_model not in {"minimax_h3_fl2va_pruned_int8_convrot.safetensors", "minimax_h3_ref2va_pruned_int8_convrot.safetensors"}:
+        video_model = "minimax_h3_ref2va_pruned_int8_convrot.safetensors" if kind == "r2v" else "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
     graph = {
-        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors", "weight_dtype": "default"}},
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": video_model, "weight_dtype": "default"}},
         "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "type": "minimax", "device": "default"}},
         "3": {"class_type": "VAELoader", "inputs": {"vae_name": "minimax_h3_video_vae_fp16.safetensors"}},
         "4": {"class_type": "VAELoader", "inputs": {"vae_name": "minimax_h3_audio_vae_fp32.safetensors"}},
         "5": {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": {"clip": ["2", 0], "vae": ["3", 0], "audio_vae": ["4", 0], "prompt": prompt, "width": width, "height": height, "length": length, "ref_image_size": "match"}},
         "6": {"class_type": "RandomNoise", "inputs": {"noise_seed": int(payload.get("seed") or 0)}},
-        "7": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "res_multistep"}},
-        "8": {"class_type": "BasicScheduler", "inputs": {"model": ["1", 0], "scheduler": "simple", "steps": 4, "denoise": 1.0}},
-        "9": {"class_type": "BasicGuider", "inputs": {"model": ["1", 0], "conditioning": ["5", 0]}},
-        "10": {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["6", 0], "guider": ["9", 0], "sampler": ["7", 0], "sigmas": ["8", 0], "latent_image": ["5", 1]}},
-        "11": {"class_type": "VAEDecode", "inputs": {"samples": ["10", 0], "vae": ["3", 0]}},
-        "12": {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["10", 0], "vae": ["4", 0]}},
-        "13": {"class_type": "CreateVideo", "inputs": {"images": ["11", 0], "fps": 24.0, "audio": ["12", 0]}},
-        "14": {"class_type": "SaveVideo", "inputs": {"video": ["13", 0], "filename_prefix": "douyin_creator/h3", "format": "auto", "codec": "auto"}},
+        "7": {"class_type": "MiniMaxH3SigmaShift", "inputs": {"model": ["1", 0], "shift_video": 12.0, "shift_audio": 3.0}},
+        "8": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "res_multistep"}},
+        "9": {"class_type": "BasicScheduler", "inputs": {"model": ["7", 0], "scheduler": "simple", "steps": 4, "denoise": 1.0}},
+        "10": {"class_type": "BasicGuider", "inputs": {"model": ["7", 0], "conditioning": ["5", 0]}},
+        "11": {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["6", 0], "guider": ["10", 0], "sampler": ["8", 0], "sigmas": ["9", 0], "latent_image": ["5", 1]}},
+        "12": {"class_type": "VAEDecode", "inputs": {"samples": ["11", 0], "vae": ["3", 0]}},
+        "13": {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["11", 0], "vae": ["4", 0]}},
+        "14": {"class_type": "CreateVideo", "inputs": {"images": ["12", 0], "fps": 24.0, "audio": ["13", 0]}},
+        "15": {"class_type": "SaveVideo", "inputs": {"video": ["14", 0], "filename_prefix": "douyin_creator/h3", "format": "auto", "codec": "auto"}},
     }
     if kind == "i2v":
-        graph["15"] = {"class_type": "LoadImage", "inputs": {"image": "reference.png"}}
-        graph["5"]["inputs"]["ref_images"] = {"ref_image_1": ["15", 0]}
+        graph["16"] = {"class_type": "LoadImage", "inputs": {"image": "reference.png"}}
+        graph["5"]["inputs"]["ref_images"] = {"ref_image_1": ["16", 0]}
     elif kind == "r2v":
-        graph["15"] = {"class_type": "LoadVideo", "inputs": {"file": "reference.mp4"}}
-        graph["16"] = {"class_type": "GetVideoComponents", "inputs": {"video": ["15", 0]}}
-        graph["5"]["inputs"]["ref_videos"] = {"ref_video_1": ["16", 0]}
-        graph["5"]["inputs"]["ref_video_audios"] = {"ref_video_audio_1": ["16", 1]}
+        graph["16"] = {"class_type": "LoadVideo", "inputs": {"file": "reference.mp4"}}
+        graph["17"] = {"class_type": "GetVideoComponents", "inputs": {"video": ["16", 0]}}
+        graph["5"]["inputs"]["ref_videos"] = {"ref_video_1": ["17", 0]}
+        graph["5"]["inputs"]["ref_video_audios"] = {"ref_video_audio_1": ["17", 1]}
     return graph
 
 

@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from services.video_creator.tools.ai.comfyui_client import ComfyUIClient, ComfyUIError
 from services.video_creator.tools.ai.config_store import ProviderConfigStore
 from services.video_creator.tools.ai.providers import MiniMaxImageProvider, MiniMaxVideoProvider, ProviderError, SeedreamImageProvider, SeedanceProvider
+from services.video_creator.tools.ai.llm import LLMError, OpenAICompatibleLLM
 from services.video_creator.tools.video.extract_frames import extract_frames
 from services.video_creator.workflow.generation import bind_media, flux_image, qwen_image, video_workflow
 try: import oss2
@@ -21,6 +22,7 @@ def model_catalog(comfy_url: str) -> dict[str, list[str]]:
         "seedance_image": ["doubao-seedream-5-0-pro-260628", "doubao-seedream-5-0-260128", "doubao-seedream-5-0-lite-260128", "doubao-seedream-4-5-251128", "doubao-seedream-4-0-250828"],
         "seedance_video": ["doubao-seedance-2-0-pro", "doubao-seedance-2-0-fast", "doubao-seedance-2-0-mini", "doubao-seedance-1-5-pro-251215", "doubao-seedance-1-0-pro-250528"],
         "comfy": [],
+        "comfy_video": [],
     }
     try:
         info = json.loads(request.urlopen(comfy_url + "/object_info", timeout=10).read())
@@ -29,10 +31,13 @@ def model_catalog(comfy_url: str) -> dict[str, list[str]]:
             for field in ("unet_name", "ckpt_name", "clip_name"):
                 values = required.get(field, [[]])[0]
                 if isinstance(values, list):
-                    models["comfy"].extend(str(value) for value in values)
+                    for value in values:
+                        target = models["comfy_video"] if field == "unet_name" and any(token in str(value).lower() for token in ("video", "minimax_h3")) else models["comfy"]
+                        target.append(str(value))
     except Exception:
         pass
     models["comfy"] = list(dict.fromkeys(models["comfy"]))
+    models["comfy_video"] = list(dict.fromkeys(models["comfy_video"]))
     models["comfy"] = [value for value in models["comfy"] if not any(token in value.lower() for token in ("minimax_h3", "qwen3vl", "qwen_2.5_vl", "video", "audio", "vae", "clip", "t5xxl"))]
     return models
 
@@ -63,6 +68,15 @@ def cloudinary_upload(config: dict, filename: str, data: bytes) -> str:
     result=json.loads(response.read()); secure_url=result.get("secure_url")
     if not secure_url: raise ValueError(result.get("error",{}).get("message","Cloudinary 上传失败"))
     return secure_url
+
+
+def save_remote_asset(url: str, target: Path) -> None:
+    """Copy short-lived cloud output URLs into the persistent local asset area."""
+    req = request.Request(url, headers={"User-Agent": "DouyinWorkspace/1.0", "Accept": "*/*"})
+    with request.urlopen(req, timeout=180) as response:
+        data=response.read()
+    if not data: raise ValueError("云端返回了空的图片内容")
+    target.write_bytes(data)
 
 HTML = """<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>视频创作</title><style>body{margin:0;background:#f7f8fa;color:#182230;font:14px Segoe UI,Microsoft YaHei,Arial,sans-serif}main{max-width:980px;margin:auto;padding:28px}.tool,.gen-panel{background:#fff;border:1px solid #dde2ea;border-radius:8px;padding:20px}h1{margin:0 0 6px}h2{margin-top:0}label{display:block;margin:14px 0 6px;color:#475467}input,select{width:100%;box-sizing:border-box;padding:10px;border:1px solid #cfd6e0;border-radius:6px;font:inherit}.mode{display:flex;gap:16px}.mode label{margin:8px 0}.mode input{width:auto}button{margin-top:18px;padding:10px 16px;border:0;border-radius:6px;background:#0f766e;color:#fff;font:inherit}.status{margin-top:14px;color:#667085;white-space:pre-wrap}.error{color:#b42318}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin-top:16px}.frame{border:1px solid #dde2ea;border-radius:6px;overflow:hidden}.frame img{width:100%;aspect-ratio:16/9;object-fit:contain;background:#101828;display:block}.frame div{padding:7px;font-size:12px;color:#667085}@media(max-width:700px){main{padding:16px}}</style></head><body><main><h1>视频创作</h1><p>视频工具与 AI 生成工作台</p><section class='tool'><h2>视频抽帧</h2><form id='form'><label>输入视频<input id='video' type='file' accept='video/*' required></label><label>抽帧方式</label><div class='mode'><label><input type='radio' name='mode' value='interval' checked>按时间间隔</label><label><input type='radio' name='mode' value='count'>按总张数</label></div><label>参数<input id='value' type='number' min='0.1' step='0.1' value='1'></label><label>图片格式<select id='format'><option value='jpg'>JPG</option><option value='png'>PNG</option><option value='webp'>WebP</option></select></label><button id='submit'>开始抽帧</button><div id='status' class='status'></div></form></section><section class='tool' style='margin-top:16px'><h2>抽帧结果</h2><div id='meta' class='status'>暂无结果</div><div id='frames' class='grid'></div></section></main><script>const form=document.querySelector('#form'),submit=document.querySelector('#submit'),status=document.querySelector('#status'),meta=document.querySelector('#meta'),frames=document.querySelector('#frames');document.querySelectorAll('input[name=mode]').forEach(r=>r.onchange=()=>{const i=document.querySelector('#value'),c=r.value==='count';i.min=c?'1':'0.1';i.step=c?'1':'0.1';i.value=c?'10':'1'});async function poll(id){for(;;){const r=await fetch('/api/jobs/'+id),j=await r.json();if(!r.ok)throw Error(j.error||'任务不存在');status.textContent=(j.message||j.status)+(j.progress==null?'':' '+j.progress+'%');if(j.status==='done')return j.result;if(j.status==='error')throw Error(j.error||'任务失败');await new Promise(x=>setTimeout(x,500))}}form.onsubmit=async e=>{e.preventDefault();const file=document.querySelector('#video').files[0],mode=document.querySelector('input[name=mode]:checked').value;submit.disabled=true;frames.replaceChildren();meta.textContent='暂无结果';status.className='status';status.textContent='正在上传视频...';const b=new FormData;b.append('video',file);b.append('mode',mode);b.append('value',document.querySelector('#value').value);b.append('format',document.querySelector('#format').value);try{const r=await fetch('/api/extract-frames',{method:'POST',body:b}),j=await r.json();if(!r.ok)throw Error(j.error||'提交失败');const x=await poll(j.jobId);meta.textContent='共 '+x.files.length+' 张，视频时长 '+x.duration+' 秒';const a=document.createElement('a');a.href=x.zip;a.textContent='下载全部图片（ZIP）';a.style.display='inline-block';a.style.marginTop='15px';frames.before(a);x.files.forEach(f=>{const c=document.createElement('div'),img=document.createElement('img'),d=document.createElement('div');c.className='frame';img.src=f.href;img.loading='lazy';d.textContent=f.name+' · '+f.timestamp+'s';c.append(img,d);frames.append(c)})}catch(err){status.className='status error';status.textContent=err.message}finally{submit.disabled=false}};</script></body></html>"""
 
@@ -111,11 +125,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         path=parse.urlsplit(self.path).path
         if path in ("/","/index.html"):
-            body=HTML.replace("</body>",'<script src="/assets/frame_preview.js"></script><script src="/assets/generation.js"></script></body>').encode(); self.send_response(200); self.send_header("content-type","text/html; charset=utf-8"); self.send_header("content-length",str(len(body))); self.end_headers(); self.wfile.write(body); return
+            body=HTML.replace("</body>",'<script src="/assets/frame_preview.js?v=2"></script><script src="/assets/generation.js?v=3"></script></body>').encode(); self.send_response(200); self.send_header("content-type","text/html; charset=utf-8"); self.send_header("content-length",str(len(body))); self.end_headers(); self.wfile.write(body); return
         if path in ("/assets/frame_preview.js","/assets/generation.js"):
-            body=Path(__file__).with_name(path.rsplit("/",1)[-1]).read_bytes(); self.send_response(200); self.send_header("content-type","text/javascript; charset=utf-8"); self.send_header("content-length",str(len(body))); self.end_headers(); self.wfile.write(body); return
+            body=Path(__file__).with_name(path.rsplit("/",1)[-1]).read_bytes(); self.send_response(200); self.send_header("content-type","text/javascript; charset=utf-8"); self.send_header("cache-control","no-store"); self.send_header("content-length",str(len(body))); self.end_headers(); self.wfile.write(body); return
         if path=="/health": self.send_json(200,{"ok":True,"service":"video-creator"}); return
         if path=="/api/providers": self.send_json(200,{"providers":self.server.providers.list_public()}); return
+        if path=="/api/llm-config":
+            config=self.server.providers.get_by_provider("llm") or {}
+            self.send_json(200,{k:("********" if k=="api_key" and v else v) for k,v in config.items() if k not in {"secret","token"}}); return
         if path=="/api/cloudinary-config": self.send_json(200,cloudinary_config()); return
         if path=="/api/storage-config": self.send_json(200,storage_config()); return
         if path=="/api/models": self.send_json(200,model_catalog(self.server.comfy_url)); return
@@ -179,6 +196,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 length=int(self.headers.get("content-length","0")); values=json.loads(self.rfile.read(length)); self.send_json(200,{"provider":self.server.providers.save(values)})
             except Exception as exc: self.send_json(400,{"error":str(exc)})
             return
+        if path=="/api/improve-prompt":
+            try:
+                length=int(self.headers.get("content-length","0")); values=json.loads(self.rfile.read(length)); config=self.server.providers.get_by_provider("llm")
+                if not config or config.get("enabled") is False: raise LLMError("请先在后台控制中配置并启用 LLM")
+                api_key=config.get("api_key") or config.get("token")
+                if not api_key: raise LLMError("LLM 尚未配置 API Key")
+                prompt=str(values.get("prompt") or "").strip(); kind=str(values.get("kind") or "image"); instruction=str(values.get("instruction") or "")
+                if not prompt: raise LLMError("请输入原始提示词")
+                model=str(config.get("model") or "gpt-4o-mini"); base_url=str(config.get("base_url") or "https://api.openai.com/v1")
+                improved=OpenAICompatibleLLM(base_url,api_key,model).improve(prompt,instruction,kind); self.send_json(200,{"prompt":improved})
+            except Exception as exc: self.send_json(400,{"error":str(exc)})
+            return
         if path in ("/api/generate-image","/api/generate-video"): self.handle_generation(path.rsplit("/",1)[-1].replace("generate-","")); return
         if path!="/api/extract-frames": self.send_json(404,{"error":"Not found"}); return
         try:
@@ -205,7 +234,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 item=form[field] if field in form else None
                 if item is None or not getattr(item,"filename",""): return None
                 path=task/(Path(item.filename).name or default); path.write_bytes(item.file.read()); return path
-            image,video=save("reference_image","reference.png"),save("reference_video","reference.mp4"); params={k:str(form.getvalue(k) or "") for k in ("model","width","height","aspect","resolution","count","frames","negative","provider_id","image_url","video_url")}; self.server.jobs.update(job,kind=kind,prompt=prompt,reference_image=image.name if image else "",reference_video=video.name if video else "",provider_id=params["provider_id"] or "local",params=params)
+            image,video=save("reference_image","reference.png"),save("reference_video","reference.mp4"); params={k:str(form.getvalue(k) or "") for k in ("model","width","height","aspect","resolution","count","duration","frames","negative","provider_id","image_url","video_url")}; self.server.jobs.update(job,kind=kind,prompt=prompt,reference_image=image.name if image else "",reference_video=video.name if video else "",provider_id=params["provider_id"] or "local",params=params)
             def run():
                 try:
                     self.server.jobs.update(job,status="running",message="正在连接生成服务",progress=5)
@@ -228,9 +257,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             elif config.get("provider") == "seedance":
                                 urls = SeedreamImageProvider("https://ark.cn-beijing.volces.com/api/v3", api_key, 60).generate(prompt, image=image, model=selected_model, aspect=params.get("aspect", "1:1"), resolution=params.get("resolution", "2K"))
                             else: raise ProviderError("当前 Provider 不支持生图")
-                            self.server.jobs.update(job,status="done",message="生图完成",progress=100,outputs=[{"type":"image","href":url} for url in urls]); return
+                            outputs=[]
+                            for index,url in enumerate(urls):
+                                local=task/f"cloud_image_{index+1}."+((parse.urlsplit(url).path.rsplit('.',1)[-1].lower()) if '.' in parse.urlsplit(url).path.rsplit('/',1)[-1] else 'png')
+                                if local.suffix not in {".jpg",".jpeg",".png",".webp"}: local=local.with_suffix(".png")
+                                save_remote_asset(url,local); outputs.append({"type":"image","href":f"/artifacts/generation_jobs/{job}/{local.name}"})
+                            self.server.jobs.update(job,status="done",message="生图完成",progress=100,outputs=outputs); return
                         cloud = MiniMaxVideoProvider("https://api.minimaxi.com", api_key, 60) if config.get("provider") == "minimax" else SeedanceProvider("https://ark.cn-beijing.volces.com/api/v3", api_key, selected_model, 60)
-                        task_id = cloud.submit(prompt, image=image, video=video, model=selected_model, image_url=params.get("image_url"), video_url=params.get("video_url"), resolution=params.get("resolution", "768P")); self.server.jobs.update(job,message="云端已接收任务",progress=15,provider_task_id=task_id); result=cloud.wait(task_id); remote=cloud.download_url(result)
+                        task_id = cloud.submit(prompt, image=image, video=video, model=selected_model, image_url=params.get("image_url"), video_url=params.get("video_url"), resolution=params.get("resolution", "768P"), duration=params.get("duration", "5"), aspect=params.get("aspect", "16:9"), ratio=params.get("aspect", "16:9")); self.server.jobs.update(job,message="云端已接收任务",progress=15,provider_task_id=task_id); result=cloud.wait(task_id); remote=cloud.download_url(result)
                         if not remote: raise ValueError("云端任务完成但没有返回视频地址")
                         self.server.jobs.update(job,status="done",message="生成完成",progress=100,outputs=[{"type":"video","href":remote}]); return
                     comfy=ComfyUIClient(self.server.comfy_url)

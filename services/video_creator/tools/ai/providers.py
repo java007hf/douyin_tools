@@ -146,7 +146,16 @@ class SeedanceProvider(JsonProvider):
         content = [{"type": "text", "text": prompt}]
         if params.get("image_url"): content.append({"type": "image_url", "image_url": {"url": params["image_url"]}})
         if params.get("video_url"): content.append({"type": "video_url", "video_url": {"url": params["video_url"]}})
-        payload = {"model": params.get("model", self.model), "content": content, "resolution": params.get("resolution", "720p"), "ratio": params.get("ratio", "16:9")}
+        model = str(params.get("model", self.model))
+        duration = int(params.get("duration", 5))
+        model_name = model.lower()
+        if "2-0" in model_name:
+            if duration < 4 or duration > 15: raise ProviderError("Seedance 2.0 视频时长必须是 4-15 秒")
+        elif "1-5" in model_name:
+            if duration < 4 or duration > 12: raise ProviderError("Seedance 1.5 视频时长必须是 4-12 秒")
+        elif duration < 2 or duration > 12:
+            raise ProviderError("Seedance 1.0 视频时长必须是 2-12 秒")
+        payload = {"model": model, "content": content, "resolution": params.get("resolution", "720p"), "ratio": params.get("ratio", "16:9"), "duration": duration}
         result = self.call("/contents/generations/tasks", payload)
         task_id = result.get("id") or result.get("task_id")
         if not task_id: raise ProviderError(f"Seedance did not return task id: {result}")
