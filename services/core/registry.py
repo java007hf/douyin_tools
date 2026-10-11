@@ -25,7 +25,9 @@ TABS = (
 
 def public_tabs(host: str, include_admin: bool = False) -> list[dict[str, object]]:
     return [
-        {**asdict(tab), "url": f"http://{host}:{tab.port}/"}
+        # Keep Tab documents on the gateway origin. The gateway proxies their
+        # APIs, which avoids requiring browsers to reach separate service ports.
+        {**asdict(tab), "url": f"/tabs/{tab.id}/"}
         for tab in TABS
         if tab.enabled and (include_admin or not tab.admin_only)
     ]

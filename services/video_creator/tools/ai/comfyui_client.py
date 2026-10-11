@@ -6,7 +6,7 @@ import mimetypes
 import time
 import uuid
 from pathlib import Path
-from urllib import parse, request
+from urllib import error as urlerror, parse, request
 
 
 class ComfyUIError(RuntimeError):
@@ -22,6 +22,12 @@ class ComfyUIClient:
         try:
             with request.urlopen(req, timeout=30) as response:
                 return response.status, response.headers, response.read()
+        except urlerror.HTTPError as exc:
+            try:
+                detail=exc.read().decode("utf-8",errors="replace")
+            except Exception:
+                detail=""
+            raise ComfyUIError(f"ComfyUI request failed: {path}: HTTP {exc.code}: {detail[:2000]}") from exc
         except Exception as exc:
             raise ComfyUIError(f"ComfyUI request failed: {path}: {exc}") from exc
 
@@ -54,7 +60,9 @@ class ComfyUIClient:
         result = json.loads(body)
         if result.get("name") is None:
             raise ComfyUIError(f"ComfyUI upload failed: {result}")
-        return str(result["name"])
+        uploaded_name=str(result["name"])
+        uploaded_subfolder=str(result.get("subfolder") or subfolder).strip("/")
+        return f"{uploaded_subfolder}/{uploaded_name}" if uploaded_subfolder else uploaded_name
 
     def queue(self, prompt: dict, client_id: str | None = None) -> str:
         payload = json.dumps({"prompt": prompt, "client_id": client_id or uuid.uuid4().hex}).encode()
@@ -69,7 +77,30 @@ class ComfyUIClient:
     def history(self, prompt_id: str) -> dict:
         return json.loads(self._request(f"/history/{parse.quote(prompt_id)}")[2])
 
-    def wait(self, prompt_id: str, progress=None, timeout: int = 3600) -> dict:
+    def queue_state(self) -> dict:
+        return json.loads(self._request("/queue")[2])
+
+    def progress_state(self) -> dict:
+        body = self._request("/progress")[2]
+        return json.loads(body) if body else {}
+
+    def cancel(self, prompt_id: str) -> bool:
+        """Remove a queued prompt or interrupt it when it is the active prompt."""
+        prompt_id = str(prompt_id or "")
+        if not prompt_id:
+            return False
+        queue = self.queue_state()
+        pending = [str(row[1]) for row in queue.get("queue_pending", []) if isinstance(row, list) and len(row) > 1]
+        running = [str(row[1]) for row in queue.get("queue_running", []) if isinstance(row, list) and len(row) > 1]
+        if prompt_id in pending:
+            self._request("/queue", json.dumps({"delete": [prompt_id]}).encode(), "POST", {"Content-Type": "application/json"})
+            return True
+        if prompt_id in running:
+            self._request("/interrupt", b"{}", "POST", {"Content-Type": "application/json"})
+            return True
+        return False
+
+    def wait(self, prompt_id: str, progress=None, timeout: int = 14400) -> dict:
         started = time.monotonic()
         while time.monotonic() - started < timeout:
             result = self.history(prompt_id)
@@ -79,7 +110,23 @@ class ComfyUIClient:
             if item and item.get("outputs"):
                 if progress: progress(100, "生成完成")
                 return item
-            if progress: progress(10, "ComfyUI 正在排队或执行工作流")
+            if progress:
+                try:
+                    queue = self.queue_state()
+                    pending = [str(row[1]) for row in queue.get("queue_pending", []) if isinstance(row, list) and len(row) > 1]
+                    running = [str(row[1]) for row in queue.get("queue_running", []) if isinstance(row, list) and len(row) > 1]
+                    if prompt_id in pending:
+                        progress(5, f"ComfyUI 排队中，前面还有 {pending.index(prompt_id)} 个任务")
+                    elif prompt_id in running:
+                        state = self.progress_state()
+                        current_id = str(state.get("prompt_id") or "")
+                        value, maximum = float(state.get("value") or 0), float(state.get("max") or 0)
+                        percent = 10 + round(value / maximum * 85) if current_id == prompt_id and maximum > 0 else 10
+                        progress(min(95, percent), "ComfyUI 正在执行工作流")
+                    else:
+                        progress(8, "ComfyUI 正在准备工作流")
+                except Exception:
+                    progress(10, "ComfyUI 正在排队或执行工作流")
             time.sleep(2)
         raise ComfyUIError("ComfyUI task timed out")
 

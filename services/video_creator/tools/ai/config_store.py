@@ -25,12 +25,12 @@ class ProviderConfigStore:
             matches = [x for x in self._read() if x.get("provider") == provider]
             return matches[-1] if matches else None
     def save(self, values: dict):
-        allowed = {"name", "provider", "base_url", "model", "api_key", "token", "secret", "enabled", "defaults"}
+        allowed = {"context_window", "api_format", "transcription_model", "name", "provider", "base_url", "model", "api_key", "token", "secret", "enabled", "defaults", "intent_system_prompt", "storyboard_system_prompt", "review_system_prompt", "default_video_provider_id", "default_video_model", "default_image_provider_id", "default_image_model", "default_t2v_provider_id", "default_t2v_model", "default_i2v_provider_id", "default_i2v_model", "default_r2v_provider_id", "default_r2v_model", "default_video_resolution", "default_video_aspect", "default_video_steps"}
         with self.lock:
             items = self._read(); current = next((x for x in items if x.get("id") == values.get("id")), None)
             if current is None: current = {"id": uuid.uuid4().hex}; items.append(current)
             for key in allowed:
-                if key in values and not (key in {"api_key", "token", "secret"} and values[key] == "********"): current[key] = values[key]
+                if key in values and not (key in {"api_key", "token", "secret"} and values[key] in {"", "********"}): current[key] = values[key]
             current.setdefault("enabled", True)
             self.path.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
             return {k: ("********" if k in {"api_key", "token", "secret"} and v else v) for k, v in current.items() if k != "secret"}

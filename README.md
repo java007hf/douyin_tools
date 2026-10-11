@@ -208,7 +208,15 @@ http://服务器IP:8003
 http://服务器IP:8003/?admin=1
 ```
 
-视频创作页面按“视频抽帧 / 生图 / 生视频”切换功能。模型下拉选项包含 ComfyUI 当前已安装模型，以及 MiniMax、Seedance 的云端模型；MiniMax 和 Seedance 在后台控制台中分别配置，普通入口不会显示后台控制 Tab。
+视频创作页面按“视频抽帧 / 生图 / 生视频 / AI视频”切换功能。模型下拉选项包含 ComfyUI 当前已安装模型，以及 MiniMax、Seedance 的云端模型；MiniMax 和 Seedance 在后台控制台中分别配置，普通入口不会显示后台控制 Tab。
+
+“生视频”直接提交一次模型生成任务；“AI视频”前台只填写创作要求、可选参考图/参考视频和总时长，并运行固定、可观测的四阶段 Workflow：理解诉求并生成故事板、逐镜头调用 T2V/I2V/R2V、AI 审片、合成最终视频。镜头数由故事板 LLM 自行决定；若用户在创作要求中明确指定镜头数，则由故事板遵循该约束。故事板与审片 JSON、镜头文件和成片均保存在 `cache/video_creator/ai_video_jobs/<task-id>/`。
+
+后台控制包含相互隔离的“生图&视频 LLM”和“AI视频”配置。“生图&视频 LLM”只供普通生图/生视频页面改善提示词；“AI视频”独立配置 Agent API 地址、API Key、Agent 模型、默认生图 Provider/模型，以及分别独立的 T2V、I2V、R2V Provider/模型和故事板规划、审片 System Prompt。AI 视频不会读取“生图&视频 LLM”的凭据或模型。故事板规划节点同时完成意图理解，输出 `creative_intent` 和 `shots`。每个镜头包含序号、起止时间、共时长、镜头与转场、美学与光影、画面与动作、声音与台词、生成 prompt 和参考策略。Workflow 会根据 `generation_plan.mode` 自动选择 T2V、I2V 或 R2V 路由，并把各镜头时长及时间轴归一化到用户指定的总时长。
+
+AI 视频故事板还包含 `continuity_bible`、镜头 `depends_on`、`continuity.must_preserve` 与 `generation_plan`。MVP 支持先生成镜头首帧再执行 I2V，以及提取上一镜头尾帧供下一镜头 I2V 使用；生成的连续性参考图和首尾帧都保存在任务目录并通过 Workflow artifact ID 传递。后台可分别选择默认生图和视频 Provider/模型。`reference_pack_i2v` 会把原始身份参考与上一镜头尾帧同时绑定到 H3 ref2va；真正的多模态视频审片仍属于后续能力。
+
+AI 视频默认采用质量优先档：H3 768p 使用约 1MP 的原生画布、16:9 和 24 个完整采样步骤，不启用 8-step Turbo。后台“AI视频”可调整清晰度、画幅和采样步数；在 12GB 显存约束下，768p 每镜头最多 5 秒，1080p 每镜头最多 3 秒。
 
 后台控制台只填写连接所需的 API 地址、API Key 和 Token，MiniMax、Seedance 的 API 地址会预填默认值。配置保存到 `cache/video_creator/provider_configs.json`；再次打开时会回填配置，敏感字段仅显示为 `********`，留空保存不会覆盖已有凭据。模型版本和比例等生成参数在 AI 创作工具中选择。
 
@@ -288,3 +296,17 @@ $env:CLOUDINARY_UPLOAD_PRESET="你的 unsigned upload preset"
 ```
 
 `CLOUDINARY_UPLOAD_PRESET` 需要在 Cloudinary 控制台中创建为 unsigned 类型。只把 Cloud Name 和 Upload Preset 暴露给浏览器，不要把 API Secret 放入前端或提交到代码库。
+
+### 抖音视频理解
+
+本机 ASR 对比后选择 `large-v3-turbo`，通过控制台“本地语音转写模型”保存，不在代码中写死选中的模型。该模型启用词级时间对齐和静音幻觉抑制；这能降低静音段的错误输出，但不能保证消除同音词、英文术语或截断语音的识别错误。模型缓存保存在 `cache/models/whisper`。
+
+每次完成后自动生成 `report.md`，包含摘要、核心观点、时间线、阶段耗时、完整原始转写、画面观察、音频分段归纳及采样图片。网页展示完整报告并提供下载、缓存视频播放和“理解历史”入口。SQLite 数据库 `cache/douyin/understanding_history.sqlite3` 的每条记录分别保存来源链接、报告正文及文件路径、视频缓存路径和结构化结果；历史在刷新或服务重启后保留，启动时自动补录以前已完成的任务。视频文件保留在任务缓存目录中，不将视频二进制写入数据库；不要手动清理仍需要回看的缓存。
+
+抖音工具的“视频理解”支持单个作品链接或分享文案，下载视频后以完整音轨转写和均匀采样画面生成内容分类、摘要、核心观点和时间线。总结优先以完整音频转写为准，画面和字幕只作辅助；冲突时以音频为准并标注，未识别到语音时注明仅基于采样画面。报告的 `summary_basis` 字段记录 `audio_primary` 或 `visual_only`。时间线可跳转原视频，展开后可查看全部语音转写，支持下载摘要 JSON。当前支持两小时以内的视频，不支持图文作品；画面为采样观察，不能保证覆盖每个动作，转写及归纳可能有误，摘要不会将作者观点当作已核实事实。
+
+执行 `python -m pip install -r requirements.txt` 安装语音转写组件。后台控制新增独立的“视频理解 LLM”配置，与提示词辅助和 AI视频配置隔离。必须在控制台选择接口类型、填写 API 地址及视觉模型并保存；代码没有默认地址、模型或 Key，也不回退到其他 LLM 配置。本机 Ollama 示例：接口类型选 Ollama，API 地址填写 `http://127.0.0.1:11434/v1`，模型填写实际安装的 `qwen3.8:latest`，本地 Key 可留空。也可选择 OpenAI 兼容接口并填写对应服务地址、模型及 Key。接口类型决定请求格式，与端口号无关：Ollama 使用 `/api/chat`，按控制台“上下文窗口（tokens）”设置上下文（4096–262144，旧配置按 16384 兼容）并关闭思考输出；增大窗口会增加内存/显存消耗，不保证提速；OpenAI 兼容服务使用 `/chat/completions`。
+
+音频在本机通过 faster-whisper 的 CPU/int8 模式转写，默认 `small`，可在后台选择 `tiny/base/small/medium/large-v3`。首次使用自动下载模型到 `cache/models/whisper/`，需要网络；音轨通过 ffprobe 检查（随 FFmpeg 安装）。模型不可达、音频转写失败或模型返回格式错误时会明确报错，不会用无声画面冒充口播摘要。
+
+任务串行处理，页面持续轮询直至完成或失败，刷新后恢复跟踪。服务重启会将遗留运行任务标记中断，需重新提交。任务视频、采样画面、转写、画面观察、分段语音归纳、最终摘要及节点状态均保存于 `<抖音 cache-dir>/web_downloads/understanding/<任务ID>/`，页面任务记录在 `<抖音 cache-dir>/web_jobs/`。云端视觉模型会接收采样图片和音频转写文本；默认 Ollama 在本地分析。

@@ -20,6 +20,7 @@ function activate(tab) {
     workspace.appendChild(frame);
   }
   frame.hidden = false;
+  document.title = `${tab.title} · Douyin Studio`;
 }
 
 async function boot() {
@@ -34,6 +35,7 @@ async function boot() {
       const button = document.createElement('button');
       button.className = 'tab';
       button.dataset.id = tab.id;
+      button.dataset.short = tab.id === 'douyin' ? '抖' : tab.id === 'video-creator' ? 'AI' : '控';
       button.textContent = tab.title;
       button.title = tab.description;
       button.addEventListener('click', () => activate(tab));

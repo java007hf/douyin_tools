@@ -67,3 +67,51 @@ class OpenAICompatibleLLM:
         if not value:
             raise LLMError("LLM returned an empty prompt")
         return value
+
+    def complete_json(self, system: str, prompt: str) -> dict:
+        """Run a structured planning/review turn and require a JSON object."""
+        endpoint = self.base_url if self.base_url.endswith("/chat/completions") else self.base_url + "/chat/completions"
+        last_error = None
+        for attempt in range(2):
+            system_prompt = system
+            if attempt:
+                system_prompt += "\n\n这是一次结构化输出重试。请输出紧凑但完整的 JSON 对象，所有字符串必须正确闭合并转义，不要 Markdown，不要解释，不要省略必需字段。"
+            payload = {
+                "model": self.model,
+                "temperature": 0.2 if attempt else 0.4,
+                # Production storyboards can exceed the provider's small default
+                # completion budget. A cut-off JSON object cannot be repaired by
+                # parsing; request enough room for the complete contract.
+                "max_tokens": 12000,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt.strip()},
+                ],
+            }
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            req = request.Request(endpoint, data=body, method="POST", headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"})
+            try:
+                with request.urlopen(req, timeout=self.timeout) as response:
+                    result = json.loads(response.read())
+                value = str(result["choices"][0]["message"]["content"]).strip()
+                if value.startswith("```"):
+                    value = value.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+                parsed = json.loads(value)
+                if not isinstance(parsed, dict):
+                    raise ValueError("root is not an object")
+                return parsed
+            except urlerror.HTTPError as exc:
+                try:
+                    detail = exc.read().decode("utf-8", errors="replace")
+                except Exception:
+                    detail = ""
+                last_error = LLMError(f"LLM structured request failed: HTTP {exc.code}: {detail[:1000]}")
+                break
+            except Exception as exc:
+                last_error = exc
+                if isinstance(exc, LLMError) or attempt:
+                    break
+        if isinstance(last_error, LLMError):
+            raise last_error
+        raise LLMError(f"LLM structured request failed: {last_error}") from last_error

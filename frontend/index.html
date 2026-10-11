@@ -3,13 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>素材工作台</title>
+  <title>Douyin Studio</title>
   <link rel="stylesheet" href="/assets/styles.css">
 </head>
 <body>
-  <header class="topbar"><div><h1>素材工作台</h1></div><span id="status">正在连接服务...</span></header>
-  <nav id="tabs" class="tabs" aria-label="功能模块"></nav>
-  <main id="workspace" class="workspace"></main>
+  <div class="app-shell">
+    <aside class="rail">
+      <a class="brand" href="/" aria-label="Douyin Studio"><span class="brand-mark">▶</span><span>Studio</span></a>
+      <nav id="tabs" class="tabs" aria-label="功能模块"></nav>
+      <div class="rail-foot"><span class="avatar">创</span><span>创作者</span></div>
+    </aside>
+    <section class="app-main">
+      <span id="status" class="sr-only" aria-live="polite">正在连接服务…</span>
+      <main id="workspace" class="workspace"></main>
+    </section>
+  </div>
   <script src="/assets/app.js"></script>
 </body>
 </html>
