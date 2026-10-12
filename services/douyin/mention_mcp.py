@@ -30,7 +30,7 @@ def create_server(kind, root, config_path, profile):
             def work():
                 from services.douyin.service import download_work_media
                 effective = config()
-                fingerprint = hashlib.sha256(json.dumps({k: effective.get(k) for k in
+                fingerprint = 'verified-aweme-v1:' + hashlib.sha256(json.dumps({k: effective.get(k) for k in
                     ('base_url', 'model', 'transcription_model', 'context_window', 'api_format')}, sort_keys=True).encode()).hexdigest()
                 download_root = root.parent.parent
                 for category in ('mentions', 'understanding'):
@@ -61,7 +61,9 @@ def create_server(kind, root, config_path, profile):
                     marker = root / 'prepared_media.json'
                     if marker.exists():
                         prepared = json.loads(marker.read_text(encoding='utf-8'))
-                        if prepared.get('url') == url:
+                        identity_path = output_dir / 'media_identity.json'
+                        identity = json.loads(identity_path.read_text(encoding='utf-8')) if identity_path.exists() else {}
+                        if prepared.get('url') == url and identity.get('work_id') == url.rsplit('/', 1)[-1] and identity.get('validation') == 'matched_aweme_id':
                             paths = [(root / name).resolve() for name in prepared.get('files', [])]
                             for path in paths:
                                 path.relative_to(root.resolve())

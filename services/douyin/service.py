@@ -13,6 +13,7 @@ First-time setup:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import http.server
 import json
 import mimetypes
@@ -2251,8 +2252,6 @@ def _download_work_media(
             if payload is None:
                 return
             media = extract_media_from_payload(payload, work_id)
-            if not media and (f"/video/{work_id}" in page.url or f"/note/{work_id}" in page.url):
-                media = extract_first_media_from_payload(payload)
 
         page.on("response", handle_response)
         page.goto(work_url, wait_until="domcontentloaded", timeout=45_000)
@@ -2275,10 +2274,7 @@ def _download_work_media(
             close_popups(page)
 
         if not media:
-            emit_progress(progress_callback, "接口未返回媒体，正在从页面图片提取")
-            media = extract_media_from_page_dom(page, prefer_images=prefer_images)
-            if media:
-                print(f"dom_media_found media={len(media)}", file=sys.stderr, flush=True)
+            emit_progress(progress_callback, "未找到目标作品 ID 对应的媒体，已拒绝推荐视频和未验证页面媒体")
 
         if not media:
             context.close()
@@ -2329,6 +2325,9 @@ def _download_work_media(
 
         context.close()
 
+    identity = {'work_id': work_id, 'source_url': work_url, 'validation': 'matched_aweme_id',
+                'files': {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in downloaded}}
+    (output_dir / 'media_identity.json').write_text(json.dumps(identity, ensure_ascii=False), encoding='utf-8')
     return downloaded
 
 

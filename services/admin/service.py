@@ -90,28 +90,30 @@ MENTION_PANEL = '''<section id="mention-control" class="panel"><h2>@我自动回
 <p>服务默认启动监听。需要 Chrome 插件已启用、抖音已登录，并配置视频理解 LLM。</p>
 <label>检查间隔（秒，30–600）<input id="mention-interval" type="number" min="30" max="600" value="60"></label>
 <label style="margin:16px 0"><input id="mention-auto" type="checkbox" checked style="width:auto"> 分析完成后自动回复原评论；关闭时仅生成草稿</label>
-<p>修改间隔或回复模式时，请先停止监听，再重新启动。停止会取消等待中的任务。</p>
-<button id="mention-start" type="button">开始监听</button> <button id="mention-stop" type="button">停止监听</button>
+<p>修改间隔或回复模式时，请先暂停监听，再重新启动。暂停会取消等待中的任务。</p>
+<button id="mention-toggle" type="button" disabled>读取状态中…</button>
 <div id="mention-control-status" class="status" role="status" aria-live="polite">正在读取监听状态…</div>
 </section>'''
 MENTION_SCRIPT = '''
-let mentionInitialized=false;
+let mentionInitialized=false,mentionActive=false,mentionBusy=false;
 async function refreshMentionControl(){
   try{
     const r=await fetch('/api/mentions');const s=await r.json();if(!r.ok)throw new Error(s.error||'读取监听状态失败');
-    document.querySelector('#mention-start').disabled=s.enabled;
-    document.querySelector('#mention-stop').disabled=!s.enabled&&!s.autostart_pending;
+    mentionActive=s.enabled||s.autostart_pending;
+    document.querySelector('#mention-toggle').disabled=mentionBusy;
+    document.querySelector('#mention-toggle').textContent=mentionBusy?'处理中…':mentionActive?'暂停监听':'启动监听';
     document.querySelector('#mention-interval').disabled=s.enabled;
     document.querySelector('#mention-auto').disabled=s.enabled;
     if(!mentionInitialized){document.querySelector('#mention-interval').value=s.interval;document.querySelector('#mention-auto').checked=s.enabled?s.auto_reply:true;mentionInitialized=true;}
-    document.querySelector('#mention-control-status').textContent=(s.enabled?'监听中':s.autostart_pending?'自动监听等待配置':'已停止')+' · '+(s.auto_reply?'自动回复':'仅草稿')+' · 等待 '+s.queue.pending+' 条 · 处理中 '+s.queue.active+' 条'+(s.last_seen?' · 扩展最后连接：'+new Date(s.last_seen*1000).toLocaleTimeString():' · 等待扩展连接')+(s.error?' · '+s.error:'');
+    document.querySelector('#mention-control-status').textContent=(s.enabled?'监听中':s.autostart_pending?'自动监听等待配置':'已暂停')+' · '+(s.auto_reply?'自动回复':'仅草稿')+' · 等待 '+s.queue.pending+' 条 · 处理中 '+s.queue.active+' 条'+(s.last_seen?' · 扩展最后连接：'+new Date(s.last_seen*1000).toLocaleTimeString():' · 等待扩展连接')+(s.error?' · '+s.error:'');
   }catch(e){document.querySelector('#mention-control-status').textContent=e.message;}
 }
 async function changeMentionControl(action){
-  try{const r=await fetch('/api/mentions/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({autoReply:document.querySelector('#mention-auto').checked,interval:Number(document.querySelector('#mention-interval').value)})});const s=await r.json();if(!r.ok)throw new Error(s.error||'操作失败');await refreshMentionControl();}catch(e){document.querySelector('#mention-control-status').textContent=e.message;}
+  if(mentionBusy)return;
+  mentionBusy=true;document.querySelector('#mention-toggle').disabled=true;document.querySelector('#mention-toggle').textContent='处理中…';
+  try{const r=await fetch('/api/mentions/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({autoReply:document.querySelector('#mention-auto').checked,interval:Number(document.querySelector('#mention-interval').value)})});const s=await r.json();if(!r.ok)throw new Error(s.error||'操作失败');await refreshMentionControl();}catch(e){document.querySelector('#mention-control-status').textContent=e.message;}finally{mentionBusy=false;document.querySelector('#mention-toggle').disabled=false;document.querySelector('#mention-toggle').textContent=mentionActive?'暂停监听':'启动监听';}
 }
-document.querySelector('#mention-start').onclick=()=>changeMentionControl('start');
-document.querySelector('#mention-stop').onclick=()=>changeMentionControl('stop');
+document.querySelector('#mention-toggle').onclick=()=>changeMentionControl(mentionActive?'stop':'start');
 refreshMentionControl();setInterval(()=>{if(document.querySelector('#mention-control').classList.contains('active'))refreshMentionControl();},5000);
 '''
 FIXED_HTML = FIXED_HTML.replace('<button data-panel="comfy">', '<button data-panel="mention-control">@我自动回复</button><button data-panel="comfy">')

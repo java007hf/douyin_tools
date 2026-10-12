@@ -3,9 +3,9 @@ import shutil
 import unittest
 import uuid
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
-from services.douyin.service import WEB_HTML, WebJobStore
+from services.douyin.service import WEB_HTML, WebJobStore, extract_media_from_payload, download_work_media
 from services.douyin.video_understanding import (
     UnderstandingProvider, validate_config, transcript_chunks, understand_work, validate_summary,
 )
@@ -15,6 +15,36 @@ TEST_CONFIG = {"base_url": "http://127.0.0.1:11434/v1", "model": "test-vision", 
 
 
 class UnderstandingTests(unittest.TestCase):
+    def test_target_page_does_not_download_unrelated_response_video(self):
+        playwright = MagicMock()
+        context = playwright.__enter__.return_value.chromium.launch_persistent_context.return_value
+        page = context.new_page.return_value
+        page.url = 'https://www.douyin.com/video/123'
+        callbacks = {}
+        page.on.side_effect = lambda name, callback: callbacks.update({name: callback})
+        response = MagicMock()
+        response.url = 'https://www.douyin.com/aweme/v1/web/aweme/detail/'
+        response.headers = {'content-type': 'application/json'}
+        response.json.return_value = {'aweme_detail': {'aweme_id': '999', 'video': {
+            'play_addr': {'url_list': ['https://example.com/wrong.mp4']}}}}
+        page.goto.side_effect = lambda *args, **kwargs: callbacks['response'](response)
+        with patch('services.douyin.service.sync_playwright', return_value=playwright), \
+             patch('services.douyin.service.close_popups'), \
+             patch('services.douyin.service.choose_default_media', side_effect=lambda context, media, *args, **kwargs: media), \
+             patch('services.douyin.service.download_url') as download:
+            with self.assertRaisesRegex(RuntimeError, 'No downloadable media'):
+                download_work_media(page.url, output_dir=self.root / 'media', headless=True,
+                                    user_data_dir=self.root / 'profile', wait_seconds=0)
+            download.assert_not_called()
+
+    def test_media_extraction_rejects_recommendations_and_missing_work_id(self):
+        wrong = {'aweme_id': '999', 'video': {'play_addr': {'url_list': ['https://example.com/wrong.mp4']}}}
+        target = {'aweme_id': '123', 'video': {'play_addr': {'url_list': ['https://example.com/target.mp4']}}}
+        self.assertEqual(extract_media_from_payload({'aweme_list': [wrong]}, '123'), [])
+        self.assertEqual(extract_media_from_payload({'video': target['video']}, '123'), [])
+        self.assertEqual([item.url for item in extract_media_from_payload({'aweme_list': [wrong, target]}, '123')],
+                         ['https://example.com/target.mp4'])
+
     def setUp(self):
         self.root = Path("cache/understanding_tests") / uuid.uuid4().hex
         self.root.mkdir(parents=True)
