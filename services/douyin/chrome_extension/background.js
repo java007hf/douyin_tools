@@ -84,6 +84,10 @@ async function sendToContent(tabId, command) {
       url: command.url,
       profileUrl: command.profileUrl,
       workId: command.workId,
+      replyId: command.replyId,
+      parentId: command.parentId,
+      accountId: command.accountId,
+      forceCapture: Boolean(command.forceCapture),
       comment: command.comment || "",
       like: Boolean(command.like),
       favorite: Boolean(command.favorite),
@@ -173,3 +177,69 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 setInterval(() => {
   pollOnce().catch(() => {});
 }, 1000);
+
+// Independent transport: existing manual collection/interaction bridge keeps port 18765.
+let mentionBusy = false;
+const mentionRecoveryAt = new Map();
+const mentionNeedsCapture = new Set();
+async function ensureMentionTab(command) {
+  const tabs = await chrome.tabs.query({url: 'https://www.douyin.com/user/self*'});
+  let tab = tabs.find(t => t.active) || tabs[0];
+  if (!tab) {
+    if (command.action === 'replyMention') throw new Error('原抖音标签页已关闭，未发送回复');
+    tab = await chrome.tabs.create({url:'https://www.douyin.com/user/self?from_tab_name=main&showTab=favorite_collection',active:false});
+    await waitForTabLoaded(tab.id);
+  }
+  if (command.action !== 'collectMentions') return tab;
+  const prepare = {...command, action:'prepareMentionCapture', timeoutMs:12000,
+    forceCapture:mentionNeedsCapture.has(tab.id)};
+  let result;
+  try { result = await sendToContent(tab.id, prepare); }
+  catch (error) { result = {ok:false,error:String(error.message || error)}; }
+  if ((!result?.ok || !result.data?.account_ready || mentionNeedsCapture.has(tab.id)) &&
+      Date.now() - (mentionRecoveryAt.get(tab.id) || 0) > 300000) {
+    // Refresh read-only page capture at most once per five minutes; never retry a publish.
+    mentionRecoveryAt.set(tab.id,Date.now());
+    await chrome.tabs.reload(tab.id);
+    await waitForTabLoaded(tab.id);
+    result = await sendToContent(tab.id,{...prepare,forceCapture:true});
+  }
+  if (!result?.ok) throw new Error(result?.error || '自动准备通知请求失败');
+  return tab;
+}
+async function pollMentions() {
+  if (mentionBusy || busy) return;
+  mentionBusy = true;
+  try {
+    const response = await fetch('http://127.0.0.1:18766/command');
+    const {command, token} = await response.json();
+    if (!command) return;
+    let outcome;
+    try {
+      const tab = await ensureMentionTab(command);
+      const result = await sendToContent(tab.id, command);
+      if (!result?.ok) throw new Error(result?.error || '页面扩展读取失败');
+      if (command.action === 'collectMentions') {
+        if (result.data?.fresh) mentionNeedsCapture.delete(tab.id);
+        else mentionNeedsCapture.add(tab.id);
+      }
+      outcome = {id: command.id, ok: true, ...result.data};
+    } catch (error) {
+      outcome = {id: command.id, ok: false, error: String(error.message || error)};
+    }
+    await fetch('http://127.0.0.1:18766/result', {method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-Mention-Token': token}, body: JSON.stringify(outcome)});
+  } catch (_) {
+    // Monitor only binds the loopback transport after the user starts it.
+  } finally {
+    mentionBusy = false;
+  }
+}
+setInterval(() => pollMentions().catch(() => {}), 5000);
+chrome.alarms.onAlarm.addListener(alarm => {
+  if (alarm.name === 'douyin-tools-poll') pollMentions().catch(() => {});
+});
+chrome.runtime.onStartup.addListener(() => {
+  chrome.alarms.create('douyin-tools-poll',{periodInMinutes:1});
+  pollMentions().catch(() => {});
+});

@@ -27,11 +27,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qsl, urlencode, unquote, urlsplit, urlunsplit
+from urllib.request import Request, urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from playwright.sync_api import Page, Response, TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
+from services.core.storage import service_store
 
 
 NOTE_AWEME_TYPES = {68}
@@ -93,7 +95,7 @@ WEB_HTML = r"""<!doctype html>
     }
     main {
       display: grid;
-      grid-template-columns: minmax(360px, 480px) minmax(420px, 1fr);
+      grid-template-columns: 190px minmax(0, 1fr);
       gap: 18px;
       padding: 18px;
       min-height: calc(100vh - 76px);
@@ -325,8 +327,18 @@ WEB_HTML = r"""<!doctype html>
     .understanding-result .timeline-row { display: flex; gap: 12px; align-items: baseline; margin: 10px 0; }
     .understanding-result .timeline-row button { flex-shrink: 0; }
     .hint { color: #667085; font-size: 12px; line-height: 1.6; }
-    @media (max-width: 940px) {
+    [hidden] { display: none !important; }
+    .tool-nav { display:flex; flex-direction:column; gap:8px; align-self:start; padding:12px; background:var(--panel); border:1px solid var(--line); border-radius:8px; }
+    .tool-nav button { justify-content:flex-start; text-align:left; white-space:normal; background:transparent; color:var(--muted); }
+    .tool-nav button[aria-selected="true"] { background:var(--accent); color:#fff; }
+    .tool-nav button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+    .tool-workspace { min-width:0; }
+    .tool-page .box { max-width:920px; }
+    .tool-page .understanding-result { border-top:1px solid var(--line); }
+    @media (max-width: 700px) {
       main { grid-template-columns: 1fr; }
+      .tool-nav { flex-direction:row; flex-wrap:wrap; }
+      .tool-nav button { flex:1; justify-content:center; }
       .list { max-height: none; }
     }
   </style>
@@ -334,7 +346,24 @@ WEB_HTML = r"""<!doctype html>
 <body>
   <header><h1>Douyin 素材工作台</h1></header>
   <main>
-    <section class="left">
+    <nav class="tool-nav" role="tablist" aria-label="抖音工具功能">
+      <button type="button" id="tabCollect" role="tab" data-tool="collect" aria-controls="pageCollect" aria-selected="true">拉取博主素材</button>
+      <button type="button" id="tabDownload" role="tab" data-tool="download" aria-controls="pageDownload" aria-selected="false">单地址下载</button>
+      <button type="button" id="tabUnderstand" role="tab" data-tool="understand" aria-controls="pageUnderstand" aria-selected="false">视频理解</button>
+      <button type="button" id="tabMentions" role="tab" data-tool="mentions" aria-controls="pageMentions" aria-selected="false">@我自动回复</button>
+    </nav>
+    <div class="tool-workspace">
+    <section id="pageMentions" class="tool-page" role="tabpanel" aria-labelledby="tabMentions" hidden>
+      <div class="box">
+        <h2>@我自动回复</h2>
+        <p>服务默认监听并回复新 @通知。监听开关、检查间隔和回复模式在 Admin 控制台的“@我自动回复”中管理。Chrome 需已安装扩展且登录抖音，并配置“视频理解 LLM”。</p>
+        <p><a href="https://www.douyin.com/user/self?from_tab_name=main&amp;showTab=favorite_collection" target="_blank" rel="noopener">打开抖音个人主页</a></p>
+        <div id="mentionStatus" class="status" role="status" aria-live="polite"></div>
+        <details><summary>通知请求状态</summary><pre id="mentionRequests" style="white-space:pre-wrap"></pre></details>
+        <div id="mentionItems"></div>
+      </div>
+    </section>
+    <section id="pageCollect" class="tool-page" role="tabpanel" aria-labelledby="tabCollect">
       <div class="box">
         <h2>拉取博主素材</h2>
         <label for="homepageUrl">博主主页地址</label>
@@ -348,10 +377,17 @@ WEB_HTML = r"""<!doctype html>
         <button id="collectBtn" class="primary">拉取列表</button>
         <div id="collectStatus" class="status"></div>
       </div>
+      <div id="materialToolbar" class="toolbar">
+        <strong>素材列表</strong>
+        <span id="count" class="count">0 条</span>
+      </div>
+      <div id="list" class="list"><div class="empty">输入博主主页地址后开始拉取</div></div>
+    </section>
+    <section id="pageDownload" class="tool-page" role="tabpanel" aria-labelledby="tabDownload" hidden>
       <div class="box">
         <h2>单地址下载</h2>
-        <label for="downloadUrl">作品下载地址</label>
-        <textarea id="downloadUrl" rows="3" placeholder="https://www.douyin.com/video/..."></textarea>
+        <label for="downloadUrl">作品链接或分享文案</label>
+        <textarea id="downloadUrl" rows="3" placeholder="粘贴抖音作品链接或整段分享文案，支持 v.douyin.com 短链接"></textarea>
         <div class="checks">
           <label><input id="allMediaSingle" type="checkbox"> 下载全部候选媒体</label>
           <label><input id="headfulDownload" type="checkbox"> 显示浏览器</label>
@@ -360,6 +396,8 @@ WEB_HTML = r"""<!doctype html>
         <div id="downloadStatus" class="status"></div>
         <div id="downloadFiles" class="downloads"></div>
       </div>
+    </section>
+    <section id="pageUnderstand" class="tool-page" role="tabpanel" aria-labelledby="tabUnderstand" hidden>
       <div class="box">
         <h2>视频理解</h2>
         <label for="understandUrl">作品链接或分享文案</label>
@@ -370,15 +408,9 @@ WEB_HTML = r"""<!doctype html>
         <div id="understandHistory" hidden></div>
         <div id="understandStatus" class="status" role="status" aria-live="polite"></div>
       </div>
-    </section>
-    <section class="result">
-      <div class="toolbar">
-        <strong>素材列表</strong>
-        <span id="count" class="count">0 条</span>
-      </div>
-      <div id="list" class="list"><div class="empty">输入博主主页地址后开始拉取</div></div>
       <article id="understandResult" class="understanding-result" hidden></article>
     </section>
+    </div>
   </main>
   <div id="previewModal" class="modal" role="dialog" aria-modal="true">
     <div class="modal-panel">
@@ -391,11 +423,70 @@ WEB_HTML = r"""<!doctype html>
   </div>
   <script>
     const $ = (id) => document.getElementById(id);
+    function selectTool(tool) {
+      const tabs = [...document.querySelectorAll("[data-tool]")];
+      if (!tabs.some(tab => tab.dataset.tool === tool)) tool = "collect";
+      tabs.forEach(tab => {
+        const active = tab.dataset.tool === tool;
+        tab.setAttribute("aria-selected", String(active));
+        tab.tabIndex = active ? 0 : -1;
+        $(tab.getAttribute("aria-controls")).hidden = !active;
+      });
+      localStorage.setItem("douyinToolView", tool);
+    }
+    const toolTabs = [...document.querySelectorAll("[data-tool]")];
+    toolTabs.forEach((tab, index) => {
+      tab.onclick = () => selectTool(tab.dataset.tool);
+      tab.onkeydown = event => {
+        if (!["ArrowDown", "ArrowUp", "ArrowRight", "ArrowLeft", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        const next = event.key === "Home" ? 0 : event.key === "End" ? toolTabs.length - 1 :
+          (index + (["ArrowDown", "ArrowRight"].includes(event.key) ? 1 : -1) + toolTabs.length) % toolTabs.length;
+        selectTool(toolTabs[next].dataset.tool);
+        toolTabs[next].focus();
+      };
+    });
+    selectTool(new URLSearchParams(location.search).get('view') || localStorage.getItem("douyinToolView") || "collect");
     let currentUrls = [];
     function mediaHref(href) {
       const prefix = window.location.pathname.match(/^\/tabs\/[^/]+/);
+      if (prefix && (href === prefix[0] || href.startsWith(prefix[0] + '/'))) return href;
       return prefix ? prefix[0] + href : href;
     }
+    async function refreshMentions() {
+      try {
+        const response = await fetch(mediaHref('/api/mentions'));
+        const state = await response.json();
+        if (!response.ok) throw new Error(state.error || '读取监听状态失败');
+        $('mentionStatus').textContent = (state.enabled ? '监听中' : state.autostart_pending ? '自动监听等待配置' : '已停止') +
+          (state.queue ? ` · 队列等待 ${state.queue.pending} 条 · 处理中 ${state.queue.active} 条 · 并发 ${state.queue.concurrency}` : '') +
+          (state.last_seen ? ' · 扩展最后连接：' + new Date(state.last_seen * 1000).toLocaleTimeString() : ' · 等待扩展连接') +
+          (state.error ? ' · ' + state.error : '');
+        $('mentionRequests').textContent = JSON.stringify(state.request_state || {}, null, 2);
+        const labels = {baseline:'已有通知（基线）',pending:'等待分析',running:'分析中',sending:'发送中',done:'已回复',draft:'回复草稿',error:'失败',cancelled:'已取消'};
+        $('mentionItems').replaceChildren();
+        for (const row of state.items) {
+          const card = document.createElement('article');
+          const link = document.createElement('a'); link.href = row.source_url; link.target = '_blank'; link.rel = 'noopener';
+          link.textContent = (row.author || '@通知') + ' · ' + (labels[row.status] || row.status);
+          if (row.queue_position) link.textContent += ` · 排队第 ${row.queue_position} 位`;
+          const detail = document.createElement('p');
+          detail.style.whiteSpace = 'pre-wrap';
+          detail.textContent = [row.text, row.progress, row.reply && '回复：' + row.reply, row.error].filter(Boolean).join('\n');
+          if (row.agent_plan) detail.textContent += '\n处理意图：' + (row.agent_plan.intent === 'question' ? '视频问答' : '视频摘要');
+          card.append(link, detail);
+          if (row.analysis && row.task_directory) {
+            const report = document.createElement('a');
+            report.href = mediaHref('/downloads/mentions/' + row.task_directory + '/report.md');
+            report.target = '_blank'; report.rel = 'noopener'; report.textContent = '查看完整视频理解报告';
+            card.append(report);
+          }
+          $('mentionItems').append(card);
+        }
+      } catch (error) { $('mentionStatus').textContent = error.message; }
+    }
+    refreshMentions();
+    setInterval(() => { if (!$('pageMentions').hidden) refreshMentions(); }, 5000);
     function timeLabel(seconds) {
       const total = Math.floor(Number(seconds) || 0);
       return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
@@ -413,6 +504,20 @@ WEB_HTML = r"""<!doctype html>
         return element;
       }
       add("h2", result.title);
+      if (result.analysis_ready === false) {
+        const labels = {pending:'排队中',running:'进行中',sending:'发送中',error:'失败',cancelled:'已取消'};
+        const sourceLabel = result.record_source === 'mention' ? `@评论回复 · ${result.reply_username || '未知用户'}` : '手动解析';
+        add('p', `${sourceLabel} · ${labels[result.reply_status] || result.reply_status}`);
+        add('p', result.progress || '等待视频分析');
+        if (result.reply_error) add('p', result.reply_error);
+        const source = add('a', '打开原视频'); source.href = result.source_url; source.target = '_blank'; source.rel = 'noopener';
+        return;
+      }
+      if (result.record_source === 'mention') {
+        add('p', `@评论回复 · 回复对象：${result.reply_username || '未知用户'} · 状态：${result.reply_status}`, panel, 'reply-state');
+        add('p', result.reply_text ? `回复正文：${result.reply_text}` : '', panel, 'reply-text');
+        add('p', result.reply_error ? `回复错误：${result.reply_error}` : '', panel, 'reply-error');
+      }
       const tags = add("div", "");
       [result.format, result.topic, ...(result.tags || [])].filter(Boolean).forEach(text => add("span", text, tags, "tag"));
       add("p", `视频 ${timeLabel(result.duration_seconds)} · ${result.frame_count} 张采样画面 · ${result.model}`, panel, "hint");
@@ -492,32 +597,45 @@ WEB_HTML = r"""<!doctype html>
       }
     }
     let historyOffset = 0;
+    let historyLoading = false;
+    let historySnapshot = '';
     async function loadUnderstandingHistory(append = false) {
       const panel = $("understandHistory");
       panel.hidden = false;
-      if (!append) { historyOffset = 0; panel.replaceChildren(); }
+      if (historyLoading) return;
+      historyLoading = true;
       try {
-        const response = await fetch(mediaHref(`/api/understanding-history?offset=${historyOffset}`));
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "加载历史失败");
-        if (!data.total) panel.textContent = "暂无视频理解记录";
+        const targetCount = append ? historyOffset + 30 : Math.max(historyOffset, 30);
+        const data = {items: [], total: 0};
+        do {
+          const response = await fetch(mediaHref(`/api/understanding-history?offset=${data.items.length}`));
+          const page = await response.json();
+          if (!response.ok) throw new Error(page.error || "加载历史失败");
+          data.total = page.total;
+          data.items.push(...page.items);
+          if (!page.items.length) break;
+        } while (data.items.length < Math.min(targetCount, data.total));
+        const snapshot = JSON.stringify(data);
+        if (snapshot === historySnapshot) return;
+        const content = document.createDocumentFragment();
+        if (!data.total) content.appendChild(document.createTextNode("暂无视频理解记录"));
         for (const item of data.items) {
           const row = document.createElement("p");
           row.style.cssText = "display:flex;gap:8px;align-items:stretch";
-          const button = document.createElement("button");
-          button.type = "button";
+          const button = document.createElement("a");
+          button.href = mediaHref(`/understanding/${encodeURIComponent(item.id)}`);
+          button.target = '_blank';
+          button.rel = 'noopener noreferrer';
           button.className = "ghost";
-          button.style.cssText = "display:block;flex:1;min-width:0;white-space:normal;text-align:left;overflow-wrap:anywhere";
-          button.textContent = `${new Date(item.created_at * 1000).toLocaleString()} · ${item.title}`;
-          button.onclick = async () => {
-            try {
-              const response = await fetch(mediaHref(`/api/understanding-history/${item.id}`));
-              const result = await response.json();
-              if (!response.ok) throw new Error(result.error || "加载记录失败");
-              renderUnderstanding(result);
-              $("understandResult").scrollIntoView({behavior: "smooth"});
-            } catch (error) { setStatus("understandStatus", error.message, true); }
-          };
+          button.style.cssText = "display:block;flex:1;min-width:0;white-space:normal;text-align:left;overflow-wrap:anywhere;padding:12px 16px;border:1px solid var(--line,#d6e1eb);border-radius:6px;color:inherit;text-decoration:none;background:white";
+          const source = item.record_source === 'mention' ? `@评论回复 · ${item.reply_username || '未知用户'}` : '手动解析';
+          button.textContent = `${new Date(item.created_at * 1000).toLocaleString()} · ${source} · ${item.title}`;
+          if (item.reply_status) {
+            const labels = {pending:'排队中',running:'进行中',sending:'发送中',done:'已回复',draft:'草稿',error:'失败',cancelled:'已取消'};
+            if (item.record_source !== 'mention') labels.done = '已完成';
+            button.textContent += ` · ${labels[item.reply_status] || item.reply_status}` + (item.progress ? ` · ${item.progress}` : '') + (item.reply_error ? ` · ${item.reply_error}` : '');
+            if (item.queue_position) button.textContent += ` · 排队第 ${item.queue_position} 位`;
+          }
           row.appendChild(button);
           const remove = document.createElement("button");
           remove.type = "button";
@@ -543,18 +661,22 @@ WEB_HTML = r"""<!doctype html>
             }
           };
           row.appendChild(remove);
-          panel.appendChild(row);
+          content.appendChild(row);
         }
-        historyOffset += data.items.length;
+        historyOffset = data.items.length;
         if (historyOffset < data.total) {
           const more = document.createElement("button");
           more.textContent = "加载更多";
-          more.onclick = () => { more.remove(); loadUnderstandingHistory(true); };
-          panel.appendChild(more);
+          more.onclick = () => loadUnderstandingHistory(true);
+          content.appendChild(more);
         }
+        panel.replaceChildren(content);
+        historySnapshot = snapshot;
       } catch (error) { setStatus("understandStatus", error.message, true); }
+      finally { historyLoading = false; }
     }
     $("understandHistoryBtn").onclick = () => loadUnderstandingHistory();
+    setInterval(() => { if (!$('pageUnderstand').hidden && !$('understandHistory').hidden) loadUnderstandingHistory(); }, 5000);
     async function waitUnderstanding(jobId) {
       for (;;) {
         let response, job;
@@ -596,6 +718,7 @@ WEB_HTML = r"""<!doctype html>
       setStatus("understandStatus", "正在创建视频理解任务...");
       try {
         const started = await postJson("/api/understand", {url, headful: $("headfulUnderstand").checked});
+        loadUnderstandingHistory();
         localStorage.setItem("douyinUnderstandingJob", started.jobId);
         await followUnderstanding(started.jobId);
       } catch (error) {
@@ -697,6 +820,8 @@ WEB_HTML = r"""<!doctype html>
     }
 
     function renderList(items) {
+      $("materialToolbar").style.display = "";
+      $("list").style.display = "";
       currentUrls = (items || []).map(normalizeItem).filter((item) => item.url);
       $("count").textContent = `${currentUrls.length} 条`;
       if (!currentUrls.length) {
@@ -788,6 +913,7 @@ WEB_HTML = r"""<!doctype html>
 
     $("collectBtn").addEventListener("click", async () => {
       const button = $("collectBtn");
+      renderList([]);
       currentUrls = [];
       downloadedByUrl.clear();
       $("count").textContent = "0 条";
@@ -855,6 +981,60 @@ WEB_HTML = r"""<!doctype html>
 """
 
 
+def understanding_detail_html() -> str:
+    """Reuse the result renderer so standalone and submission views stay consistent."""
+    style = WEB_HTML.split('<style>', 1)[1].split('</style>', 1)[0]
+    renderer = WEB_HTML.split('    function timeLabel(seconds)', 1)[1].split('    let historyOffset', 1)[0]
+    return r'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>视频理解详情</title>
+<style>''' + style + r'''
+body{margin:0;padding:24px;font-family:"Microsoft YaHei","Segoe UI",sans-serif}main.detail-page{max-width:1100px;margin:auto;display:block}
+.detail-page h2{font-size:26px;line-height:1.45}.detail-page h3{font-size:20px}
+.detail-toolbar{display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-bottom:20px}
+.detail-toolbar a{color:#245d83}.detail-status{margin-left:auto;white-space:pre-wrap}
+.understanding-result{border-top:1px solid #d6e1eb;background:white;padding:24px}
+.summary-text{max-width:80ch!important}@media(max-width:600px){body{padding:12px}.understanding-result{padding:16px}.detail-status{margin-left:0;width:100%}}
+</style></head><body><main class="detail-page">
+<nav class="detail-toolbar" aria-label="详情导航"><a id="backLink">← 返回视频理解</a>
+<span id="detailStatus" class="detail-status" role="status" aria-live="polite">正在加载记录…</span></nav>
+<article id="understandResult" class="understanding-result" hidden></article>
+</main><script>
+const $ = id => document.getElementById(id);
+const prefix = location.pathname.match(/^\/tabs\/[^/]+/);
+function mediaHref(href){if(prefix && (href === prefix[0] || href.startsWith(prefix[0] + '/')))return href;return (prefix ? prefix[0] : '') + href;}
+$('backLink').href = mediaHref('/?view=understand');
+''' + 'function timeLabel(seconds)' + renderer + r'''
+const id = location.pathname.split('/').filter(Boolean).pop();
+let rendered = '';
+async function refreshDetail(){
+  let again = true;
+  try{
+    const response = await fetch(mediaHref('/api/understanding-history/' + encodeURIComponent(id)), {cache:'no-store'});
+    const result = await response.json();
+    if(!response.ok){again = response.status !== 404;throw new Error(result.error || '加载记录失败');}
+    document.title = (result.title || '视频理解') + ' · 详情';
+    const labels = {pending:'排队中',running:'进行中',sending:'发送中',done:'已完成',draft:'回复草稿',error:'失败',cancelled:'已取消'};
+    if(result.record_source === 'mention') labels.done = '已回复';
+    const status = result.reply_status || 'done';
+    $('detailStatus').textContent = [labels[status] || status, result.progress, result.reply_error].filter(Boolean).join(' · ');
+    // Keep video playback, expanded sections and reading position during reply-status updates.
+    const content = {...result};
+    if(result.analysis_ready !== false){delete content.progress;delete content.reply_status;delete content.reply_text;delete content.reply_error;}
+    const snapshot = JSON.stringify(content);
+    if(snapshot !== rendered){renderUnderstanding(result);rendered = snapshot;}
+    if(result.record_source === 'mention' && result.analysis_ready !== false){
+      document.querySelector('.reply-state').textContent = `@评论回复 · 回复对象：${result.reply_username || '未知用户'} · 状态：${labels[status] || status}`;
+      document.querySelector('.reply-text').textContent = result.reply_text ? '回复正文：' + result.reply_text : '';
+      document.querySelector('.reply-error').textContent = result.reply_error ? '回复错误：' + result.reply_error : '';
+    }
+    again = ['pending','running','sending'].includes(status);
+  }catch(error){$('detailStatus').textContent = error.message;}
+  if(again) setTimeout(refreshDetail,5000);
+}
+refreshDetail();
+</script></body></html>'''
+
+
 def print_json(data: Any) -> None:
     encoding = (sys.stdout.encoding or "").lower()
     ensure_ascii = "utf" not in encoding
@@ -898,7 +1078,14 @@ class WebJobStore:
             target = self.directory / (job_id + ".json")
             temp = target.with_suffix(".tmp")
             temp.write_text(json.dumps(self._jobs[job_id], ensure_ascii=False), encoding="utf-8")
-            temp.replace(target)
+            for attempt in range(8):
+                try:
+                    temp.replace(target)
+                    break
+                except PermissionError:
+                    if attempt == 7:
+                        raise
+                    time.sleep(min(0.05 * (2 ** attempt), 0.5))
 
     def create(self, message: str) -> str:
         job_id = uuid.uuid4().hex
@@ -1035,23 +1222,37 @@ def seed_browser_profile(source: Path, target: Path) -> None:
             continue
 
 
-def run_web_server(host: str, port: int, cache_dir: Path) -> None:
-    cache_dir = cache_dir.resolve()
-    download_root = cache_dir / "web_downloads"
-    url_list_root = cache_dir / "web_url_lists"
-    legacy_user_data_dir = cache_dir / ".douyin-browser"
-    collect_user_data_dir = cache_dir / ".douyin-browser-collect"
-    download_user_data_dir = cache_dir / ".douyin-browser-download"
+def run_web_server(host: str, port: int, cache_dir: Path, store_dir: Path | None = None) -> None:
+    persistent_dir = (store_dir or service_store("douyin")).resolve()
+    download_root = persistent_dir / "web_downloads"
+    url_list_root = persistent_dir / "web_url_lists"
+    legacy_user_data_dir = persistent_dir / ".douyin-browser"
+    collect_user_data_dir = persistent_dir / ".douyin-browser-collect"
+    download_user_data_dir = persistent_dir / ".douyin-browser-download"
     download_root.mkdir(parents=True, exist_ok=True)
     url_list_root.mkdir(parents=True, exist_ok=True)
     collect_user_data_dir.mkdir(parents=True, exist_ok=True)
     download_user_data_dir.mkdir(parents=True, exist_ok=True)
     seed_browser_profile(legacy_user_data_dir, collect_user_data_dir)
     seed_browser_profile(legacy_user_data_dir, download_user_data_dir)
-    jobs = WebJobStore(cache_dir / "web_jobs")
+    jobs = WebJobStore(persistent_dir / "web_jobs")
     from services.douyin.understanding_history import UnderstandingHistory, render_report
-    history = UnderstandingHistory(cache_dir / "understanding_history.sqlite3", download_root)
+    history = UnderstandingHistory(persistent_dir / "understanding_history.sqlite3", download_root)
     history.backfill()
+    history.interrupt_manual_tasks()
+    from services.douyin.mention_monitor import MentionMonitor
+
+    def mention_config():
+        from services.douyin.video_understanding import validate_config
+        from services.video_creator.tools.ai.config_store import ProviderConfigStore
+        path = service_store('video_creator') / 'provider_configs.json'
+        return validate_config(ProviderConfigStore(path).get_by_provider('douyin_understanding'))
+
+    from services.douyin.mention_agent import MentionAgent
+    agent = MentionAgent(mention_config, service_store('video_creator') / 'provider_configs.json', download_user_data_dir)
+    mention_monitor = MentionMonitor(download_root / 'mentions', None, None, history.save_mention, agent=agent)
+    if os.environ.get('DOUYIN_MENTION_AUTOSTART', '1').lower() in {'1', 'true', 'yes'}:
+        mention_monitor.configure_autostart(mention_config)
     for trace_path in (download_root / "understanding").glob("*/task.json"):
         try:
             trace = json.loads(trace_path.read_text(encoding="utf-8"))
@@ -1076,6 +1277,9 @@ def run_web_server(host: str, port: int, cache_dir: Path) -> None:
 
         def do_GET(self) -> None:
             parsed = urlsplit(self.path)
+            if parsed.path == '/api/mentions':
+                web_json_response(self, 200, mention_monitor.status())
+                return
             if parsed.path == "/api/understanding-history":
                 try:
                     offset = max(0, int(dict(parse_qsl(parsed.query)).get("offset", "0")))
@@ -1093,11 +1297,19 @@ def run_web_server(host: str, port: int, cache_dir: Path) -> None:
                 if len(parts) == 3:
                     web_json_response(self, 200, result)
                 else:
-                    root = download_root / "understanding" / result["history_id"]
+                    if result.get('analysis_ready') is False:
+                        web_json_response(self, 409, {'error': '视频分析尚未完成，报告暂不可用'})
+                        return
+                    relative = result.get('artifact_directory') or 'understanding/' + result['history_id']
+                    root = (download_root / relative).resolve()
+                    root.relative_to(download_root.resolve())
                     trace = json.loads((root / "task.json").read_text(encoding="utf-8"))
-                    web_text_response(self, 200, render_report(root, result, trace, "../../../downloads/understanding/" + result["history_id"] + "/"))
+                    web_text_response(self, 200, render_report(root, result, trace, "../../../downloads/" + relative + "/"))
                 return
-            if self.path in ("/", "/index.html"):
+            if re.fullmatch(r"/understanding/[0-9a-f]{32}", parsed.path):
+                web_text_response(self, 200, understanding_detail_html())
+                return
+            if parsed.path in ("/", "/index.html"):
                 web_text_response(self, 200, WEB_HTML)
                 return
 
@@ -1189,6 +1401,18 @@ def run_web_server(host: str, port: int, cache_dir: Path) -> None:
             try:
                 data = read_json_request(self)
 
+                if self.path == '/api/mentions/start':
+                    mention_config()
+                    mention_monitor.start(auto_reply=json_bool(data, 'autoReply'), interval=data.get('interval', 60))
+                    web_json_response(self, 200, mention_monitor.status())
+                    return
+                if self.path == '/api/mentions/stop':
+                    web_json_response(self, 200, mention_monitor.stop())
+                    return
+                if self.path == '/api/mentions/process-existing':
+                    web_json_response(self, 202, mention_monitor.queue_existing(data.get('id')))
+                    return
+
                 if self.path == "/api/collect":
                     homepage_url = str(data.get("url") or "").strip()
                     if not homepage_url:
@@ -1236,37 +1460,37 @@ def run_web_server(host: str, port: int, cache_dir: Path) -> None:
                 if self.path == "/api/understand":
                     from services.douyin.video_understanding import validate_config, understand_work
                     from services.video_creator.tools.ai.config_store import ProviderConfigStore
-                    work_url = str(data.get("url") or "").strip()
-                    match = re.search(r"https?://[^\s<>]+", work_url)
-                    if not match:
-                        raise ValueError("请输入抖音作品链接或分享文案")
-                    work_url = match.group(0).rstrip("。，,！!；;")
-                    hostname = urlsplit(work_url).hostname or ""
-                    if hostname != "douyin.com" and not hostname.endswith(".douyin.com"):
-                        raise ValueError("请使用抖音作品链接")
-                    config_path = Path(__file__).resolve().parents[2] / "cache/video_creator/provider_configs.json"
+                    work_url = extract_douyin_work_url(str(data.get("url") or ""))
+                    config_path = service_store("video_creator") / "provider_configs.json"
                     saved = ProviderConfigStore(config_path).get_by_provider("douyin_understanding")
                     config = validate_config(saved)
                     headful = json_bool(data, "headful")
                     task_root = download_root / "understanding" / uuid.uuid4().hex
+                    history.update_manual(task_root, work_url, 'pending', '等待视频理解队列')
 
                     def understanding_task(progress):
+                        def tracked_progress(message, partial_result=None):
+                            status = 'pending' if message == '等待视频理解队列' else 'running'
+                            history.update_manual(task_root, work_url, status, message)
+                            progress(message, partial_result)
                         def download(url, output_dir, callback):
                             return download_work_media(url, output_dir=output_dir, headless=not headful,
                                 user_data_dir=download_user_data_dir, all_media=False,
                                 wait_seconds=1.5, progress_callback=callback)
-                        result = understand_work(work_url, task_root, download, config, progress)
-                        progress("正在保存完整报告和历史记录")
-                        return history.save(task_root, result)
+                        try:
+                            result = understand_work(work_url, task_root, download, config, tracked_progress)
+                            tracked_progress("正在保存完整报告和历史记录")
+                            return history.save(task_root, {**result, 'record_source': 'manual', 'reply_status': 'done', 'analysis_ready': True})
+                        except Exception as exc:
+                            history.update_manual(task_root, work_url, 'error', '失败', str(exc))
+                            raise
 
                     job_id = start_web_job(jobs, "正在创建视频理解任务", understanding_task)
                     web_json_response(self, 202, {"jobId": job_id})
                     return
 
                 if self.path == "/api/download":
-                    work_url = str(data.get("url") or "").strip()
-                    if not work_url:
-                        raise ValueError("请输入作品下载地址")
+                    work_url = extract_douyin_work_url(str(data.get("url") or ""))
                     all_media = json_bool(data, "allMedia")
                     headful = json_bool(data, "headful")
 
@@ -1298,6 +1522,28 @@ def run_web_server(host: str, port: int, cache_dir: Path) -> None:
         pass
     finally:
         server.server_close()
+
+
+def extract_douyin_work_url(text: str) -> str:
+    for candidate in re.findall(r"https?://[^\s<>\[\]【】\"'“”]+", text, re.IGNORECASE):
+        candidate = candidate.rstrip("。，,！!；;：:）)")
+        hostname = urlsplit(candidate).hostname or ""
+        if hostname == "douyin.com" or hostname.endswith(".douyin.com"):
+            return candidate
+    raise ValueError("请输入抖音作品链接或包含链接的分享文案")
+
+
+def resolve_douyin_work_url(text: str) -> str:
+    url = extract_douyin_work_url(text)
+    if urlsplit(url).hostname == "v.douyin.com":
+        request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            with urlopen(request, timeout=30) as response:
+                url = response.geturl()
+        except Exception as exc:
+            raise ValueError("抖音短链接解析失败，请重试或复制完整作品链接") from exc
+        url = extract_douyin_work_url(url)
+    return standard_open_url(url)
 
 
 def parse_sec_uid(homepage_url: str) -> str:
@@ -1957,7 +2203,16 @@ def choose_default_media(
     return images or media
 
 
-def download_work_media(
+_download_lock = threading.Lock()
+
+
+def download_work_media(work_url, **kwargs):
+    # The reusable download profile has one browser writer; model work has its own queue.
+    with _download_lock:
+        return _download_work_media(work_url, **kwargs)
+
+
+def _download_work_media(
     work_url: str,
     *,
     output_dir: Path,
@@ -1967,6 +2222,8 @@ def download_work_media(
     wait_seconds: float = 6.0,
     progress_callback: ProgressCallback | None = None,
 ) -> list[Path]:
+    emit_progress(progress_callback, "正在解析作品链接")
+    work_url = resolve_douyin_work_url(work_url)
     work_id = parse_work_id(work_url)
     prefer_images = is_note_work_url(work_url)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -2917,7 +3174,7 @@ def main() -> int:
     parser.add_argument(
         "--download-dir",
         type=Path,
-        default=Path("downloads"),
+        default=service_store("douyin") / "downloads",
         help="Directory for --download output files",
     )
     parser.add_argument(
@@ -2976,7 +3233,7 @@ def main() -> int:
     parser.add_argument(
         "--user-data-dir",
         type=Path,
-        default=Path(".douyin-browser"),
+        default=service_store("douyin") / ".douyin-browser",
         help="Browser profile directory. Reused so manual login can persist.",
     )
     parser.add_argument("--web", action="store_true", help="Start the web interface")
@@ -2986,12 +3243,14 @@ def main() -> int:
         "--cache-dir",
         type=Path,
         default=Path("cache"),
-        help="Directory for web downloads, URL lists, and browser profile",
+        help="Directory for disposable temporary files",
     )
+    parser.add_argument("--store-dir", type=Path, default=service_store("douyin"), help="Persistent state, history, media, and browser profiles")
     args = parser.parse_args()
 
     if args.web:
-        run_web_server(args.web_host, args.web_port, args.cache_dir)
+        os.environ["DOUYIN_STORE_DIR"] = str(args.store_dir.resolve().parent)
+        run_web_server(args.web_host, args.web_port, args.cache_dir, args.store_dir)
         return 0
 
     if args.download:

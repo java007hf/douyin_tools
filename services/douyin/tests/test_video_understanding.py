@@ -108,12 +108,50 @@ class UnderstandingTests(unittest.TestCase):
         rendered = render_report(root, saved, trace, "/downloads/")
         self.assertNotIn("<script>", rendered)
         self.assertIn("&lt;script&gt;", rendered)
+        mention_root = download_root / 'mentions' / 'mention-id'
+        mention_root.mkdir(parents=True)
+        (mention_root / 'video.mp4').touch()
+        (mention_root / 'task.json').write_text(json.dumps(trace), encoding='utf-8')
+        mention = {'id': 'account:work:comment', 'author': '<Jessica>', 'status': 'done',
+                   'analysis': result, 'reply': '回复正文', 'error': ''}
+        restored.save_mention(mention_root, mention)
+        restored.save_mention(mention_root, {**mention, 'status': 'draft'})
+        mention_saved = restored.get('mention-id')
+        self.assertEqual(mention_saved['artifact_directory'], 'mentions/mention-id')
+        self.assertEqual(mention_saved['video']['href'], '/downloads/mentions/mention-id/video.mp4')
+        self.assertEqual(mention_saved['reply_status'], 'draft')
+        listed = next(x for x in restored.list()['items'] if x['id'] == 'mention-id')
+        self.assertEqual(listed['record_source'], 'mention')
+        self.assertEqual(listed['reply_username'], '<Jessica>')
+        self.assertIn('&lt;Jessica&gt;', render_report(mention_root, mention_saved, trace, '/downloads/'))
+        restored.delete('mention-id')
+        restored.save_mention(mention_root, mention)
+        self.assertIsNone(restored.get('mention-id'))
         self.assertTrue(restored.delete("test-id"))
         self.assertFalse(restored.delete("test-id"))
         restored = UnderstandingHistory(self.root / "history.sqlite3", download_root)
         restored.backfill()
         self.assertEqual(restored.list()["total"], 0)
         self.assertIsNone(restored.get("test-id"))
+
+    def test_pending_mention_history_updates_without_report(self):
+        from services.douyin.understanding_history import UnderstandingHistory
+        downloads = self.root / 'downloads'
+        store = UnderstandingHistory(self.root / 'history.sqlite3', downloads)
+        root = downloads / 'mentions' / 'queued-id'
+        row = {'id': 'account:work:comment', 'author': '测试用户', 'status': 'pending',
+               'source_url': 'https://www.douyin.com/video/123', 'created_at': 10}
+        store.save_mention(root, row)
+        self.assertFalse(store.get('queued-id')['analysis_ready'])
+        self.assertEqual(store.list()['items'][0]['queue_position'], 1)
+        store.save_mention(root, {**row, 'status': 'running', 'progress': '正在转写'})
+        self.assertEqual(store.list()['total'], 1)
+        self.assertEqual(store.list()['items'][0]['progress'], '正在转写')
+        store.save_mention(root, {**row, 'status': 'error', 'error': '下载失败'})
+        self.assertEqual(store.get('queued-id')['reply_error'], '下载失败')
+        store.delete('queued-id')
+        store.save_mention(root, row)
+        self.assertEqual(store.list()['total'], 0)
 
     def test_download_failure_is_saved(self):
         def download(*args):
@@ -132,6 +170,20 @@ class UnderstandingTests(unittest.TestCase):
         restored = WebJobStore(self.root)
         self.assertEqual(restored.get(running)["status"], "error")
         self.assertEqual(restored.get(done)["result"], {"summary": "saved"})
+
+    def test_job_write_retries_temporary_windows_file_lock(self):
+        store = WebJobStore(self.root)
+        original = Path.replace
+        attempts = []
+        def replace(path, target):
+            attempts.append(path)
+            if len(attempts) < 3:
+                raise PermissionError("temporary file lock")
+            return original(path, target)
+        with patch.object(Path, "replace", replace), patch("services.douyin.service.time.sleep"):
+            identifier = store.create("retry")
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(json.loads((self.root / (identifier + ".json")).read_text(encoding="utf-8"))["message"], "retry")
 
     def test_multimodal_payload_uses_actual_image_bytes(self):
         image = self.root / "frame.jpg"

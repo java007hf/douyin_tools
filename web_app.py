@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import http.server
 import json
+import os
 import signal
 import subprocess
 import sys
@@ -15,6 +16,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from services.core.registry import public_tabs
+from services.core.storage import migrate_legacy_store, store_root
 
 
 ROOT = Path(__file__).resolve().parent
@@ -165,11 +167,15 @@ class FrontendHandler(http.server.BaseHTTPRequestHandler):
 def start_services(args: argparse.Namespace) -> list[subprocess.Popen[bytes]]:
     cache_dir = Path(args.cache_dir).resolve()
     cache_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["DOUYIN_STORE_DIR"] = str(Path(args.store_dir).resolve())
+    migrate_legacy_store(cache_dir)
+    persistent_dir = store_root()
     service_host = args.service_host
+    os.environ['DOUYIN_SERVICE_URL'] = f'http://127.0.0.1:{args.douyin_port}'
     commands = [
-        [sys.executable, str(ROOT / "services" / "douyin" / "service.py"), "--web", "--web-host", service_host, "--web-port", str(args.douyin_port), "--cache-dir", str(cache_dir / "douyin")],
-        [sys.executable, str(ROOT / "services" / "video_creator" / "service.py"), "--host", service_host, "--port", str(args.video_port)],
-        [sys.executable, str(ROOT / "services" / "admin" / "service.py"), "--host", service_host, "--port", "8103", "--cache-dir", str(cache_dir / "video_creator")],
+        [sys.executable, str(ROOT / "services" / "douyin" / "service.py"), "--web", "--web-host", service_host, "--web-port", str(args.douyin_port), "--cache-dir", str(cache_dir / "douyin"), "--store-dir", str(persistent_dir / "douyin")],
+        [sys.executable, str(ROOT / "services" / "video_creator" / "service.py"), "--host", service_host, "--port", str(args.video_port), "--cache-dir", str(cache_dir / "video_creator"), "--store-dir", str(persistent_dir / "video_creator")],
+        [sys.executable, str(ROOT / "services" / "admin" / "service.py"), "--host", service_host, "--port", "8103", "--cache-dir", str(cache_dir / "video_creator"), "--store-dir", str(persistent_dir / "video_creator")],
     ]
     return [subprocess.Popen(command, cwd=ROOT) for command in commands]
 
@@ -188,6 +194,7 @@ def main() -> int:
     parser.add_argument("--douyin-port", type=int, default=8101)
     parser.add_argument("--video-port", type=int, default=8102)
     parser.add_argument("--cache-dir", type=Path, default=Path("cache"))
+    parser.add_argument("--store-dir", type=Path, default=store_root())
     parser.add_argument("--no-admin", action="store_true", help="Hide the private admin tab")
     parser.add_argument("--no-start-services", action="store_true", help="Use separately started tab services")
     args = parser.parse_args()

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Douyin Tools Helper",
-  "version": "0.4.4",
+  "version": "0.4.8",
   "description": "Bridge local Python commands to the logged-in Douyin browser session.",
   "permissions": ["activeTab", "scripting", "clipboardWrite", "tabs", "alarms"],
   "host_permissions": [
@@ -17,6 +17,12 @@
     "default_title": "Douyin Tools"
   },
   "content_scripts": [
+    {
+      "matches": ["https://www.douyin.com/*"],
+      "js": ["mention_requests.js"],
+      "world": "MAIN",
+      "run_at": "document_start"
+    },
     {
       "matches": ["https://www.douyin.com/*"],
       "js": ["content.js"],

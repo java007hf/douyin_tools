@@ -11,6 +11,7 @@ function douyinToolsContentMain() {
 
     const script = document.createElement("script");
     script.src = `${chrome.runtime.getURL("injected.js")}?v=${CONTENT_VERSION}&t=${Date.now()}`;
+    script.dataset.extensionVersion = CONTENT_VERSION;
     script.onload = () => script.remove();
     script.onerror = () => {
       console.error(`Douyin Tools ${CONTENT_VERSION}: failed to inject page script`);

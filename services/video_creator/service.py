@@ -16,6 +16,7 @@ from services.video_creator.workflow.generation import bind_media, flux_image, q
 from services.video_creator.workflow.context import WorkflowContext
 from services.video_creator.workflows.ai_video import AIVideoWorkflow
 from services.video_creator.asset_library import ReferenceAssetStore
+from services.core.storage import service_store
 try: import oss2
 except ImportError: oss2=None
 
@@ -48,18 +49,18 @@ def model_catalog(comfy_url: str) -> dict[str, list[str]]:
 
 def cloudinary_config() -> dict[str, str | bool]:
     values={"cloud_name":os.getenv("CLOUDINARY_CLOUD_NAME",""),"upload_preset":os.getenv("CLOUDINARY_UPLOAD_PRESET","")}
-    path=Path("cache/video_creator/cloudinary.json")
+    path=service_store("video_creator") / "cloudinary.json"
     try:
         values.update(json.loads(path.read_text(encoding="utf-8")))
     except (OSError, json.JSONDecodeError): pass
     try:
-        storage=json.loads(Path("cache/video_creator/storage.json").read_text(encoding="utf-8"))
+        storage=json.loads((service_store("video_creator") / "storage.json").read_text(encoding="utf-8"))
         if storage.get("provider")=="cloudinary": values.update({k:storage.get(k,"") for k in ("cloud_name","upload_preset")})
     except (OSError, json.JSONDecodeError): pass
     values["enabled"]=bool(values.get("cloud_name") and values.get("upload_preset")); return values
 
 def storage_config() -> dict[str, str | bool]:
-    path=Path("cache/video_creator/storage.json"); values={}
+    path=(service_store("video_creator") / "storage.json"); values={}
     try: values=json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError): pass
     values["provider"]=values.get("provider") or "oss"; values["enabled"]=bool((values.get("provider")=="oss" and values.get("endpoint") and values.get("bucket") and values.get("access_key_id") and values.get("access_key_secret") and values.get("public_base_url")) or (values.get("provider")=="cloudinary" and values.get("cloud_name") and values.get("upload_preset"))); return values
@@ -130,8 +131,8 @@ class Jobs:
         with self.lock: return self.data.pop(job, None) is not None
 
 class PersistentJobs:
-    def __init__(self, path: Path = Path("cache/video_creator/assets.db")):
-        self.path, self.lock = path, threading.Lock(); self.path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, path: Path | None = None):
+        self.path, self.lock = path or service_store("video_creator") / "assets.db", threading.Lock(); self.path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.path) as db: db.execute("CREATE TABLE IF NOT EXISTS assets (id TEXT PRIMARY KEY, data TEXT NOT NULL, created_at REAL NOT NULL)")
     def create(self):
         job=uuid.uuid4().hex; value={"id":job,"status":"queued","message":"任务已创建"}
@@ -214,7 +215,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path.startswith("/api/generation-jobs/") and path.endswith("/trace"):
             job_id=path.split("/")[-2];job=self.server.jobs.get(job_id)
             if not job: self.send_json(404,{"error":"任务不存在"}); return
-            task_dir=self.server.cache_dir/("ai_video_jobs" if job.get("kind")=="ai_video" else "generation_jobs")/job_id
+            task_dir=self.server.store_dir/("ai_video_jobs" if job.get("kind")=="ai_video" else "generation_jobs")/job_id
             files=[str(item.relative_to(task_dir)).replace("\\","/") for item in task_dir.rglob("*") if item.is_file()] if task_dir.is_dir() else []
             children=[item for item in self.server.jobs.list() if item.get("parent_job")==job_id]
             self.send_json(200,{"task":job,"child_tasks":children,"artifact_files":files}); return
@@ -226,8 +227,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except Exception as exc: self.send_json(502,{"error":str(exc)})
             return
         if path.startswith("/artifacts/"):
-            target=(self.server.cache_dir/parse.unquote(path[len("/artifacts/"):])).resolve()
-            try: target.relative_to(self.server.cache_dir.resolve())
+            target=(self.server.store_dir/parse.unquote(path[len("/artifacts/"):])).resolve()
+            try: target.relative_to(self.server.store_dir.resolve())
             except ValueError: self.send_error(403); return
             if target.is_file():
                 body=target.read_bytes(); self.send_response(200); self.send_header("content-type",mimetypes.guess_type(target.name)[0] or "application/octet-stream"); self.send_header("content-length",str(len(body))); self.end_headers(); self.wfile.write(body); return
@@ -295,7 +296,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 reference=self.server.asset_library.use(asset_id); upload=form["reference_image"] if "reference_image" in form else None; temp=None
                 uploaded=upload is not None and bool(getattr(upload,"filename",""))
                 if uploaded:
-                    suffix=Path(upload.filename).suffix.lower() or ".png"; temp=self.server.cache_dir/"reference_library"/("regenerate-"+uuid.uuid4().hex+suffix);temp.write_bytes(upload.file.read());reference=temp
+                    suffix=Path(upload.filename).suffix.lower() or ".png"; temp=self.server.store_dir/"reference_library"/("regenerate-"+uuid.uuid4().hex+suffix);temp.write_bytes(upload.file.read());reference=temp
                 if not reference or not reference.is_file(): raise ValueError("原资产参考图已丢失，请上传新的参考图")
                 host=self.server.server_address[0];base=f"http://{'127.0.0.1' if host in ('0.0.0.0','::') else host}:{self.server.server_address[1]}"
                 fields={"provider_id":"local","model":"qwen_image_fp8_e4m3fn.safetensors","prompt":prompt,"count":"1","aspect":"16:9","resolution":"2K","reference_type":"style" if asset.get("kind")=="style" else "identity"}
@@ -312,10 +313,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             outputs=state.get("outputs") or [];href=str(outputs[0].get("href") or "") if outputs else ""
                             if href:
                                 if href.startswith("/artifacts/"):
-                                    source=(self.server.cache_dir/parse.unquote(href[len("/artifacts/"):])).resolve();source.relative_to(self.server.cache_dir)
+                                    source=(self.server.store_dir/parse.unquote(href[len("/artifacts/"):])).resolve();source.relative_to(self.server.store_dir)
                                 else:
                                     query=parse.parse_qs(parse.urlsplit(href).query);suffix=Path(str((query.get("filename") or ["asset.png"])[0])).suffix or ".png"
-                                    source=self.server.cache_dir/"generation_jobs"/job_id/("regenerated_asset"+suffix);source.parent.mkdir(parents=True,exist_ok=True)
+                                    source=self.server.store_dir/"generation_jobs"/job_id/("regenerated_asset"+suffix);source.parent.mkdir(parents=True,exist_ok=True)
                                     with request.urlopen(href if href.startswith("http") else base+href,timeout=300) as remote: source.write_bytes(remote.read())
                                 description=dict(asset.get("description") or {});description.update({"prompt":prompt,"derived_from":asset_id,"generation_model":"qwen_image_fp8_e4m3fn.safetensors","reference_source":"uploaded" if uploaded else "current_asset"})
                                 generated,duplicate=self.server.asset_library.add(source,name=str(asset.get("name") or "未命名资产")[:80],kind=str(asset.get("kind") or "character"),description=description,source_type="asset_regeneration",source_id=job_id)
@@ -355,7 +356,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     form=cgi.FieldStorage(fp=self.rfile,headers=self.headers,environ={"REQUEST_METHOD":"POST","CONTENT_TYPE":content_type})
                     item=form["file"] if "file" in form else None
                     if item is None or not getattr(item,"filename",""): raise ValueError("请选择参考图")
-                    suffix=Path(item.filename).suffix.lower() or ".bin"; temp=self.server.cache_dir/"reference_library"/("upload-"+uuid.uuid4().hex+suffix); temp.parent.mkdir(parents=True,exist_ok=True); temp.write_bytes(item.file.read())
+                    suffix=Path(item.filename).suffix.lower() or ".bin"; temp=self.server.store_dir/"reference_library"/("upload-"+uuid.uuid4().hex+suffix); temp.parent.mkdir(parents=True,exist_ok=True); temp.write_bytes(item.file.read())
                     try: asset,duplicate=self.server.asset_library.add(temp,name=str(form.getvalue("name") or Path(item.filename).stem),kind=str(form.getvalue("kind") or "character"),description=json.loads(str(form.getvalue("description") or "{}")))
                     finally: temp.unlink(missing_ok=True)
                 else:
@@ -365,7 +366,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     if index<0 or index>=len(outputs) or outputs[index].get("type")!="image": raise ValueError("请选择草稿中的图片产物")
                     href=str(outputs[index].get("href") or ""); prefix="/artifacts/"
                     if not href.startswith(prefix): raise ValueError("远程临时图片请先下载后上传到资产库")
-                    source=(self.server.cache_dir/parse.unquote(href[len(prefix):])).resolve(); source.relative_to(self.server.cache_dir)
+                    source=(self.server.store_dir/parse.unquote(href[len(prefix):])).resolve(); source.relative_to(self.server.store_dir)
                     description=values.get("description") if isinstance(values.get("description"),dict) else {"prompt":job.get("prompt","")}
                     asset,duplicate=self.server.asset_library.add(source,name=str(values.get("name") or job.get("prompt") or "未命名资产")[:80],kind=str(values.get("kind") or "character"),description=description,source_type="generation",source_id=job["id"])
                 self.send_json(200,{"asset":asset,"duplicate":duplicate})
@@ -415,7 +416,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if upload is None or not getattr(upload,"filename",""): raise ValueError("请上传视频文件")
             mode,value,fmt=str(form.getvalue("mode") or "interval"),float(form.getvalue("value") or 0),str(form.getvalue("format") or "jpg")
             if mode not in {"interval","count"} or value<=0: raise ValueError("抽帧参数无效")
-            job=self.server.jobs.create(); task=self.server.cache_dir/"frame_jobs"/job; task.mkdir(parents=True,exist_ok=True); source=task/(Path(upload.filename).name or "input.mp4"); source.write_bytes(upload.file.read())
+            job=self.server.jobs.create(); task=self.server.store_dir/"frame_jobs"/job; task.mkdir(parents=True,exist_ok=True); source=task/(Path(upload.filename).name or "input.mp4"); source.write_bytes(upload.file.read())
             def run():
                 try:
                     self.server.jobs.update(job,status="running",message="正在读取视频"); result=extract_frames(source,task/"frames",interval_seconds=value if mode=="interval" else None,frame_count=int(value) if mode=="count" else None,image_format=fmt,progress_callback=lambda msg,cur,total:self.server.jobs.update(job,message=msg,progress=round(cur/total*100))); archive=task/"frames.zip"
@@ -432,7 +433,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not brief: raise ValueError("请输入视频创作要求")
             agent_config=self.server.providers.get_by_provider("ai_video_agent") or {}
             if not agent_config or agent_config.get("enabled") is False or not (agent_config.get("api_key") or agent_config.get("token")): raise LLMError("请先在后台控制的 AI视频 中配置并启用 Agent 模型")
-            job=self.server.jobs.create(); task=self.server.cache_dir/"ai_video_jobs"/job; task.mkdir(parents=True,exist_ok=True)
+            job=self.server.jobs.create(); task=self.server.store_dir/"ai_video_jobs"/job; task.mkdir(parents=True,exist_ok=True)
             def save(field, default):
                 item=form[field] if field in form else None
                 if item is None or not getattr(item,"filename",""): return None
@@ -569,7 +570,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             form=cgi.FieldStorage(fp=self.rfile,headers=self.headers,environ={"REQUEST_METHOD":"POST","CONTENT_TYPE":self.headers.get("content-type","")}); prompt=str(form.getvalue("prompt") or "").strip()
             if not prompt: raise ValueError("请输入提示词")
-            job=self.server.jobs.create(); task=self.server.cache_dir/"generation_jobs"/job; task.mkdir(parents=True,exist_ok=True)
+            job=self.server.jobs.create(); task=self.server.store_dir/"generation_jobs"/job; task.mkdir(parents=True,exist_ok=True)
             parent_job=str(form.getvalue("parent_job") or "").strip();repair_shot_id=str(form.getvalue("repair_shot_id") or "").strip()
             if parent_job:
                 parent=self.server.jobs.get(parent_job)
@@ -594,8 +595,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             source_job=str(form.getvalue("retry_source_job") or "").strip()
             if source_job and not image and not video:
                 source=self.server.jobs.get(source_job)
-                source_dir=(self.server.cache_dir/"generation_jobs"/source_job).resolve()
-                try: source_dir.relative_to(self.server.cache_dir.resolve())
+                source_dir=(self.server.store_dir/"generation_jobs"/source_job).resolve()
+                try: source_dir.relative_to(self.server.store_dir.resolve())
                 except ValueError: source=None
                 if source:
                     for field,default in (("reference_image","reference.png"),("reference_video","reference.mp4")):
@@ -700,7 +701,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except Exception as exc: self.send_json(400,{"error":str(exc)})
 
 def main():
-    p=argparse.ArgumentParser(); p.add_argument("--host",default="127.0.0.1"); p.add_argument("--port",type=int,default=8102); p.add_argument("--cache-dir",type=Path,default=Path("cache/video_creator")); a=p.parse_args(); a.cache_dir.mkdir(parents=True,exist_ok=True); server=http.server.ThreadingHTTPServer((a.host,a.port),Handler); server.jobs=Jobs(); server.cancelled_jobs=set(); server.cache_dir=a.cache_dir.resolve(); server.asset_library=ReferenceAssetStore(server.cache_dir/"reference_library"); server.comfy_url=os.getenv("COMFYUI_URL","http://127.0.0.1:8188"); server.providers=ProviderConfigStore(server.cache_dir/"provider_configs.json"); print(f"video creator listening=http://{a.host}:{a.port} comfy={server.comfy_url}",flush=True)
+    p=argparse.ArgumentParser(); p.add_argument("--host",default="127.0.0.1"); p.add_argument("--port",type=int,default=8102); p.add_argument("--cache-dir",type=Path,default=Path("cache/video_creator")); p.add_argument("--store-dir",type=Path,default=service_store("video_creator")); a=p.parse_args(); a.cache_dir.mkdir(parents=True,exist_ok=True); server=http.server.ThreadingHTTPServer((a.host,a.port),Handler); a.store_dir.mkdir(parents=True,exist_ok=True); server.store_dir=a.store_dir.resolve(); os.environ["DOUYIN_STORE_DIR"]=str(server.store_dir.parent); server.jobs=Jobs(server.store_dir/"assets.db"); server.cancelled_jobs=set(); server.asset_library=ReferenceAssetStore(server.store_dir/"reference_library"); server.comfy_url=os.getenv("COMFYUI_URL","http://127.0.0.1:8188"); server.providers=ProviderConfigStore(server.store_dir/"provider_configs.json"); print(f"video creator listening=http://{a.host}:{a.port} comfy={server.comfy_url}",flush=True)
     recover_comfy_jobs(server)
     try: server.serve_forever()
     except KeyboardInterrupt: pass

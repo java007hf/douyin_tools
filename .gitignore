@@ -1,4 +1,5 @@
 cache/
+store/
 __pycache__/
 *.py[cod]
 .douyin-browser/

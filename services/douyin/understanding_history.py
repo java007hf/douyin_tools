@@ -22,6 +22,8 @@ def report_sections(root, result, trace):
         ("画面识别中间结果", json.dumps(read("observations.json"), ensure_ascii=False, indent=2)),
         ("音频分段归纳中间结果", json.dumps(read("speech_notes.json"), ensure_ascii=False, indent=2)),
     ]
+    if result.get('record_source') == 'mention':
+        sections.insert(0, ('@评论回复', f"回复对象：{result.get('reply_username', '')}\n处理状态：{result.get('reply_status', '')}\n回复正文：{result.get('reply_text', '')}\n错误：{result.get('reply_error', '')}"))
     return sections
 
 
@@ -70,6 +72,26 @@ class UnderstandingHistory:
     def connect(self):
         return sqlite3.connect(self.path, timeout=30)
 
+    def update_manual(self, root, source_url, status, progress='', error=''):
+        identifier = Path(root).name
+        payload = {'history_id': identifier, 'source_url': source_url,
+                   'title': '视频理解任务', 'record_source': 'manual',
+                   'reply_status': status, 'progress': progress,
+                   'reply_error': error, 'analysis_ready': False}
+        with self.connect() as db:
+            if db.execute('SELECT 1 FROM deleted_understanding_history WHERE id=?', (identifier,)).fetchone():
+                return
+            db.execute('INSERT INTO understanding_history VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET result_json=excluded.result_json',
+                       (identifier, time.time(), source_url, payload['title'], '', '', '', json.dumps(payload, ensure_ascii=False)))
+
+    def interrupt_manual_tasks(self):
+        with self.connect() as db:
+            for identifier, raw in db.execute('SELECT id,result_json FROM understanding_history').fetchall():
+                payload = json.loads(raw)
+                if payload.get('record_source') == 'manual' and payload.get('reply_status') in ('pending', 'running'):
+                    payload.update(reply_status='error', reply_error='服务重启，任务已中断', progress='已中断')
+                    db.execute('UPDATE understanding_history SET result_json=? WHERE id=?', (json.dumps(payload, ensure_ascii=False), identifier))
+
     def save(self, root, result):
         root = Path(root).resolve()
         relative = root.relative_to(self.download_root).as_posix()
@@ -81,12 +103,14 @@ class UnderstandingHistory:
         trace = json.loads((root / "task.json").read_text(encoding="utf-8"))
         markdown = write_report(root, result, trace)
         payload = dict(result)
-        payload.update(history_id=identifier, video={"href": "/downloads/" + quote(video, safe="/")},
+        payload.update(history_id=identifier, artifact_directory=relative, video={"href": "/downloads/" + quote(video, safe="/")},
                        report={"href": "/downloads/" + quote(relative + "/report.md", safe="/")},
                        summary_report={"href": "/downloads/" + quote(relative + "/summary.json", safe="/")})
         payload.pop("video_file", None)
         with self.connect() as db:
-            db.execute("INSERT OR IGNORE INTO understanding_history VALUES (?,?,?,?,?,?,?,?)", (
+            if db.execute('SELECT 1 FROM deleted_understanding_history WHERE id=?', (identifier,)).fetchone():
+                return payload
+            db.execute("INSERT INTO understanding_history VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,report_file=excluded.report_file,video_cache_file=excluded.video_cache_file,report_markdown=excluded.report_markdown,result_json=excluded.result_json", (
                 identifier, trace.get("nodes", [{}])[0].get("started_at", time.time()), result["source_url"],
                 result["title"], relative + "/report.md", markdown, video, json.dumps(payload, ensure_ascii=False)))
         return payload
@@ -94,9 +118,37 @@ class UnderstandingHistory:
     def list(self, limit=30, offset=0):
         with self.connect() as db:
             db.row_factory = sqlite3.Row
-            rows = db.execute("SELECT id,created_at,title,source_url FROM understanding_history ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?", (limit, offset)).fetchall()
+            rows = db.execute("SELECT id,created_at,title,source_url,result_json FROM understanding_history ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?", (limit, offset)).fetchall()
             total = db.execute("SELECT count(*) FROM understanding_history").fetchone()[0]
-        return {"items": [dict(row) for row in rows], "total": total}
+            pending = []
+            for entry in db.execute('SELECT id,created_at,result_json FROM understanding_history ORDER BY created_at,id'):
+                if json.loads(entry['result_json']).get('reply_status') == 'pending':
+                    pending.append(entry['id'])
+            positions = {identifier: index + 1 for index, identifier in enumerate(pending)}
+        items = []
+        for row in rows:
+            item = dict(row)
+            result = json.loads(item.pop('result_json'))
+            item.update(record_source=result.get('record_source', 'manual'), reply_username=result.get('reply_username', ''), reply_status=result.get('reply_status', ''), progress=result.get('progress', ''), reply_error=result.get('reply_error', ''))
+            item['queue_position'] = positions.get(item['id'])
+            items.append(item)
+        return {"items": items, "total": total}
+
+    def save_mention(self, root, row):
+        result = row.get('analysis')
+        metadata = {'record_source': 'mention', 'reply_username': row.get('author', ''),
+                    'reply_status': row['status'], 'reply_text': row.get('reply', ''),
+                    'reply_error': row.get('error', ''), 'mention_id': row['id'],
+                    'agent_plan': row.get('agent_plan', {}), 'progress': row.get('progress', '')}
+        if not result or not (root / 'task.json').exists():
+            payload = {**metadata, 'history_id': root.name, 'title': '@视频处理', 'source_url': row['source_url'], 'analysis_ready': False}
+            with self.connect() as db:
+                if db.execute('SELECT 1 FROM deleted_understanding_history WHERE id=?', (root.name,)).fetchone():
+                    return
+                db.execute('INSERT INTO understanding_history VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET result_json=excluded.result_json',
+                    (root.name, row.get('created_at', time.time()), row['source_url'], payload['title'], '', '', '', json.dumps(payload, ensure_ascii=False)))
+            return
+        self.save(root, {**result, **metadata, 'analysis_ready': True})
 
     def get(self, identifier):
         with self.connect() as db:
@@ -104,6 +156,17 @@ class UnderstandingHistory:
         return json.loads(row[0]) if row else None
 
     def backfill(self):
+        mentions = self.download_root / 'mentions'
+        if (mentions / 'mentions.sqlite3').exists():
+            with sqlite3.connect(mentions / 'mentions.sqlite3', timeout=30) as db:
+                rows = db.execute('SELECT data FROM mentions').fetchall()
+            for (raw,) in rows:
+                row = json.loads(raw)
+                if row.get('task_directory'):
+                    try:
+                        self.save_mention(mentions / row['task_directory'], row)
+                    except (ValueError, OSError, KeyError):
+                        continue
         for file in (self.download_root / "understanding").glob("*/summary.json"):
             with self.connect() as db:
                 if db.execute("SELECT 1 FROM deleted_understanding_history WHERE id=?", (file.parent.name,)).fetchone():

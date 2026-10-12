@@ -1,5 +1,5 @@
 (function () {
-  const VERSION = window.__douyinToolsExtensionVersion || "unknown";
+  const VERSION = document.currentScript?.dataset.extensionVersion || window.__douyinToolsExtensionVersion || "unknown";
   if (window.__douyinToolsVersion === VERSION) return;
   window.__douyinToolsInjected = true;
   window.__douyinToolsVersion = VERSION;
@@ -10,6 +10,73 @@
     profileItems: new Map(),
     profileResponses: []
   };
+
+  async function collectMentions() {
+    if (!window.__douyinMentionRequests) {
+      throw new Error('请求采集器未加载，请重载扩展并刷新抖音页面');
+    }
+    return window.__douyinMentionRequests.collect();
+  }
+  async function prepareMentionCapture(options) {
+    if (!window.__douyinMentionRequests) throw new Error('请求采集器未加载，请刷新页面');
+    let capture = window.__douyinMentionRequests.captureState();
+    if (capture.account_ready && capture.notice_ready && !options.forceCapture) return capture;
+    function findLabel(labels) {
+      return Array.from(document.querySelectorAll('button,a,[role="button"],[aria-label],[title],span,div'))
+        .filter(el => visible(el) && labels.some(label =>
+          [el.getAttribute('aria-label'), el.getAttribute('title'), (el.textContent || '').trim()].includes(label)))
+        .sort((a, b) => a.querySelectorAll('*').length - b.querySelectorAll('*').length)[0];
+    }
+    function activate(el) {
+      if (!el) return false;
+      const target = el.closest('button,a,[role="button"]') || el;
+      target.dispatchEvent(new MouseEvent('mouseover', {bubbles:true}));
+      target.dispatchEvent(new MouseEvent('mouseenter', {bubbles:false}));
+      target.click();
+      return true;
+    }
+    const pause = () => new Promise(resolve => setTimeout(resolve, 500));
+    if (!findLabel(['互动消息'])) {
+      if (!activate(findLabel(['通知']))) throw new Error('找不到通知入口；请确认已登录抖音，页面结构可能已变化');
+      await pause();
+    }
+    const labels = ['@我的', '@我', '提到我的', '提及我的'];
+    let filter = findLabel(labels);
+    if (!filter) {
+      activate(findLabel(['全部消息', '全部通知']));
+      await pause();
+      filter = findLabel(labels);
+    }
+    activate(filter);
+    for (let attempt = 0; attempt < 8; attempt++) {
+      await pause();
+      capture = window.__douyinMentionRequests.captureState();
+      if (capture.account_ready && capture.notice_ready) return capture;
+    }
+    return {...capture, warning:'已自动打开通知，尚未捕获可识别的 @通知请求；请检查登录状态或通知响应结构'};
+  }
+  async function replyMention(message) {
+    if (!window.__douyinMentionRequests) throw new Error('请求采集器未加载，请刷新页面');
+    await window.__douyinMentionRequests.verifyAccount(message.accountId);
+    const stableId = value => typeof value === 'string' && /^\d+$/.test(value) ? value :
+      Number.isSafeInteger(value) && value >= 0 ? String(value) : '';
+    if (!stableId(message.workId) || !stableId(message.replyId)) throw new Error('回复缺少作品或原评论 ID');
+    const text = String(message.comment || '').trim();
+    if (!text || text.length > 300) throw new Error('回复长度必须为 1–300 字');
+    // One POST only: a failed/ambiguous response must not publish a duplicate or a top-level comment.
+    const response = await signedFetch('/aweme/v1/web/comment/publish/', {
+      ...paramsFromCaptured(message.workId), text, text_extra: '[]',
+      reply_id: stableId(message.parentId) || message.replyId,
+      ...(stableId(message.parentId) ? {reply_to_reply_id: message.replyId} : {})
+    }, 'POST');
+    const posted = response.payload?.comment;
+    const nestedTarget = stableId(posted?.reply_to_reply_id);
+    const target = nestedTarget && nestedTarget !== '0' ? nestedTarget : stableId(posted?.reply_id);
+    if (!success(response, 'comment') || !stableId(posted?.cid) || target !== message.replyId) {
+      throw new Error(`回复未确认成功或目标评论不匹配，禁止重发；${JSON.stringify(summarizeResponse(response))}`);
+    }
+    return {comment_id: stableId(posted.cid), reply_id: target};
+  }
 
   function isInteresting(url) {
     return /\/aweme\/v1\/web\/(comment|commit|aweme\/favorite|aweme\/collect)/.test(url);
@@ -248,7 +315,7 @@
     const text = await response.text();
     let payload = null;
     try {
-      payload = JSON.parse(text);
+      payload = window.__douyinMentionRequests ? window.__douyinMentionRequests.decodeJSON(text) : JSON.parse(text);
     } catch (_) {
       payload = null;
     }
@@ -729,6 +796,16 @@
     if (!message || message.source !== "douyin-tools-content-v3") return;
 
     try {
+      if (message.action === 'prepareMentionCapture') {
+        const data = await prepareMentionCapture(message);
+        window.postMessage({id: message.id, source: 'douyin-tools-page', ok: true, data}, '*');
+        return;
+      }
+      if (message.action === 'collectMentions' || message.action === 'replyMention') {
+        const data = message.action === 'collectMentions' ? await collectMentions() : await replyMention(message);
+        window.postMessage({id: message.id, source: 'douyin-tools-page', ok: true, data}, '*');
+        return;
+      }
       if (message.action === "getCaptured") {
         window.postMessage({
           id: message.id,

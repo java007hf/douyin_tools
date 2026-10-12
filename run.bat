@@ -1,5 +1,7 @@
 @echo off
 setlocal
+rem Starting the workspace also enables new-mention analysis and replies.
+if not defined DOUYIN_MENTION_AUTOSTART set "DOUYIN_MENTION_AUTOSTART=1"
 cd /d "%~dp0"
 
 title Douyin Workspace
@@ -15,6 +17,10 @@ for %%P in (8003 8101 8102 8103) do (
 timeout /t 1 /nobreak >nul
 
 echo Starting the gateway and tab services...
+if "%DOUYIN_MENTION_AUTOSTART%"=="1" (
+    rem Chrome must be running for its logged-in extension to receive commands.
+    start "" chrome.exe
+)
 echo Open http://127.0.0.1:8003/ or http://192.168.3.104:8003/
 echo Keep this window open while using the services.
 echo.

@@ -11,9 +11,55 @@ Keep the repository root clean. The root should contain source code, committed u
 - `frontend/`
 - `services/`
 
+`store/` and `cache/` are ignored runtime directories, not committed source.
+
+## Persistent Store
+
+All durable application data belongs in `store/`. `cache/` is disposable and
+must never be the only copy of credentials, databases, login state, history,
+reports, reusable assets, models, or user-visible generated/downloaded media.
+
+```text
+store/
+  models/whisper/                 # ASR model weights (Whisper large-v3-turbo)
+  douyin/
+    understanding_history.sqlite3 # Understanding records and deletion markers
+    web_jobs/                     # Persistent web task status JSON
+    web_downloads/
+      understanding/<task-id>/    # Video, report.md, transcript, frames, trace
+      mentions/                   # Mention DB, drafts, reports and source media
+      ...                        # User downloads
+    web_url_lists/                # Saved creator collection results
+    .douyin-browser*/             # Reusable browser login profiles
+    legacy/                       # Preserved older standalone profiles/downloads
+  video_creator/
+    provider_configs.json        # Admin Provider/LLM credentials and settings
+    storage.json                 # Media storage configuration
+    cloudinary.json              # Legacy Cloudinary configuration, if present
+    assets.db                    # Creation task/feed records
+    reference_library/           # library.db, asset JSON and original files
+    ai_video_jobs/<task-id>/      # Workflow traces, input, references and outputs
+    generation_jobs/<task-id>/    # Generation inputs, plans and outputs
+    frame_jobs/<task-id>/         # User frame extraction results
+cache/
+  ...                            # Tests, diagnostics, scratch files and logs
+```
+
+Use `services/core/storage.py` to resolve persistent paths. The default store
+is `<repository>/store`; `DOUYIN_STORE_DIR` or the gateway `--store-dir` can
+override it. Tab service `--store-dir` denotes that service's subdirectory.
+`DOUYIN_ASR_MODEL_DIR` can override the ASR weight directory independently.
+Legacy persistent data in `cache/` is migrated before gateway child services
+start; writers must be stopped first. Migration must not overwrite an existing
+destination. Keep API media URLs and database relationships stable when moving
+files; retain portable relative artifact names and update historical absolute
+paths. Back up `store/`; do not commit it or include credentials in logs.
+
 ## Cache And Test Artifacts
 
-Put all local test files, temporary browser profiles, downloaded media, scratch outputs, generated URL lists, copied request payloads, screenshots, and debug logs under `cache/`.
+Put local test files, temporary test browser profiles/media, scratch outputs,
+test URL lists, copied request payloads, screenshots, and debug logs under
+`cache/`. User downloads, reusable login profiles and saved results use `store/`.
 
 Examples:
 
@@ -53,6 +99,7 @@ python -m py_compile services\douyin\service.py services\video_creator\service.p
 node --check services\douyin\chrome_extension\background.js
 node --check services\douyin\chrome_extension\content.js
 node --check services\douyin\chrome_extension\injected.js
+node --check services\douyin\chrome_extension\mention_requests.js
 node --check services\douyin\chrome_extension\popup.js
 ```
 
@@ -101,7 +148,7 @@ services/
 
 - Treat every execution as a task with a unique ID and explicit node statuses: `pending`, `running`, `success`, and `failed`.
 - Store intermediate outputs as named artifacts, such as video files, frame images, subtitles, analysis JSON, and generated media.
-- Keep all task files under a task-specific directory inside `cache/`, making cleanup and download boundaries explicit.
+- Keep persistent Workflow task files under a task-specific directory inside `store/video_creator/`; use `cache/` only for disposable scratch work.
 - Record node progress, structured logs, errors, and retry information so long-running jobs are observable.
 - Wrap LLM and video-understanding integrations behind Provider interfaces, allowing models or vendors to change without rewriting Workflows.
 - A Workflow may be enabled, replaced, or deployed independently after registration in `video_creator/workflow/registry.py`.
@@ -177,7 +224,7 @@ The canonical task details are in `todo.md`. Keep the checklist below synchroniz
 - Every AI Video or long-running generation submission must be monitored from creation until a terminal state: `done`, `error`, or explicit cancellation.
 - After submission, poll the parent task and all child ComfyUI/provider tasks on a fixed interval; do not report only the task ID and stop observing.
 - Monitoring is active follow-up, not log collection: inspect node progress, queue position, stalled heartbeats, child task output, and generated artifacts at each interval.
-- If a task fails, stalls, or produces an invalid artifact, immediately inspect the complete parent node error, child task error, provider request ID when available, and ComfyUI validation message under the task directory in `cache/`.
+- If a task fails, stalls, or produces an invalid artifact, immediately inspect the complete parent node error, child task error, provider request ID when available, and ComfyUI validation message under the task directory in `store/video_creator/`.
 - For actionable failures, fix the code, workflow, prompt binding, or runtime configuration; run a focused validation; stop the invalid task; and retry automatically when the retry is safe. Do not wait for the user to ask what happened.
 - Continue monitoring the retry through review and composition. Only report completion after the final artifact is available and inspectable, or report a concrete external blocker requiring user input.
 - Until multimodal video inspection is implemented, the metadata-only AI review is advisory and must not block a valid set of generated clips; preserve its warnings in the task trace and continue composition.
@@ -284,9 +331,25 @@ The Admin tab is enabled by default and runs on port `8103`. Provider configurat
 
 ### 抖音视频理解
 
+- [x] 实现 @我通知监听、首次基线、账号/评论持久去重、视频分析、原评论自动回复及草稿模式，并提供停止和任务状态。
+- [x] 将 @我通知采集改为页面启动时捕获真实 fetch/Request/XHR 请求，保留原读取请求模板，移除 DOM/React 扫描，并展示脱敏请求状态、校验新鲜度和当前账号。
+- [x] 让 run.bat 默认自动开启新 @通知监听及回复，扩展自动打开/复用个人主页并准备通知读取请求；支持等待配置重试、停止及有间隔限制的刷新恢复。
+- [ ] 在已登录 Chrome 中完成 @我通知与原评论回复的单条端到端验收，核实真实通知字段及嵌套评论回复参数。
+- [x] 用 Jessica 的单条顶层 @评论完成真实通知、下载、视频理解与原评论回复验收；支持 notice_list_v2[].at 和单条基线记录测试，嵌套评论仍待真实验收。
+- [x] 将 @评论的视频分析纳入视频解析历史，区分来源、标注回复用户名及结果，并补入已有分析记录。
+- [x] 使用持久化 FIFO 队列串行处理 @消息，展示队列数量及位置，重启后验证账号再恢复未开始任务。
+- [x] 将 @自动回复限定为视频内容摘要，不向回复模型传入提及评论文字。
+- [x] 升级 @处理为主 Agent 意图识别与独立视频理解/摘要问答 MCP，保留队列与确定性发送，增加工具轨迹和分析缓存复用。
+- [x] 用“@Benyl 总结一下”完成主 Agent + MCP 摘要路径线上验收，确认原评论回复及历史保存。
+- [x] 在 @消息入队时即创建历史，持续更新排队位置、处理阶段和最终状态，并自动刷新历史列表。
+
 - [x] 对比 small、medium、large-v3、large-v3-turbo 和 SenseVoice，保存完整实测报告，配置选用 turbo 并开启词级对齐和静音幻觉抑制。
 
 - [x] 每次理解自动生成完整 report.md，SQLite 保存来源链接、报告正文/路径、视频缓存路径及结果；网页展示报告并提供持久化历史入口。
 
 - [x] 输入单个作品链接后下载视频，独立配置本地 Ollama/视觉模型，完整音频转写并按时间抽帧分析。
 - [x] 展示形态/主题分类、摘要、核心要点、可跳转时间线和完整转写；保存任务进度、错误及报告，并恢复页面监控、标记服务重启中断。
+
+### 持久存储
+
+- [x] 将持久配置、数据库、模型、历史报告与媒体统一迁到 store/，cache/ 仅保存临时文件，并记录目录与迁移规则。

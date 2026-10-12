@@ -5,6 +5,7 @@ import base64
 import gc
 import json
 import math
+import os
 import re
 import subprocess
 import threading
@@ -14,6 +15,7 @@ from urllib import error, request
 from urllib.parse import urlsplit
 
 import cv2
+from services.core.storage import store_root
 
 _analysis_lock = threading.Lock()
 ASR_MODELS = {"tiny", "base", "small", "medium", "large-v3", "large-v3-turbo"}
@@ -159,7 +161,8 @@ def transcribe(video, root, config, progress):
     model_name = str(config["transcription_model"])
     if model_name not in ASR_MODELS:
         raise ValueError("不支持的语音转写模型")
-    model_cache = Path(__file__).resolve().parents[2] / "cache" / "models" / "whisper"
+    model_cache = Path(os.environ.get("DOUYIN_ASR_MODEL_DIR") or store_root() / "models" / "whisper")
+    model_cache.mkdir(parents=True, exist_ok=True)
     progress(f"加载语音转写模型 {model_name}（首次使用需下载模型）")
     model = WhisperModel(model_name, device="cpu", compute_type="int8", download_root=str(model_cache))
     try:
@@ -267,12 +270,17 @@ def understand_work(url, root, download, config, progress):
             node["ended_at"] = time.time()
             save()
 
-    progress("等待视频理解队列")
     save()
+    try:
+        progress("正在下载作品视频")
+        paths = run_node("download", lambda: download(resolve_work_link(url), root / "media", progress))
+    except Exception as exc:
+        trace.update(status="error", error=str(exc))
+        save()
+        raise
+    progress("等待视频理解队列")
     with _analysis_lock:
         try:
-            progress("正在下载作品视频")
-            paths = run_node("download", lambda: download(resolve_work_link(url), root / "media", progress))
             videos = [p for p in paths if p.suffix.lower() in {".mp4", ".mov", ".webm", ".mkv"}]
             if not videos:
                 raise ValueError("该作品没有可分析的视频，暂不支持图文作品")

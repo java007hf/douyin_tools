@@ -3,9 +3,10 @@
 from __future__ import annotations
 import argparse, html, http.server, json, os, sys
 from pathlib import Path
-from urllib import request
+from urllib import request, error
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from services.video_creator.tools.ai.config_store import ProviderConfigStore
+from services.core.storage import service_store
 from services.video_creator.workflow.prompts import DEFAULT_REVIEW_PROMPT, DEFAULT_STORYBOARD_PROMPT
 
 class CloudinaryConfigStore:
@@ -81,17 +82,62 @@ FIXED_HTML = FIXED_HTML.replace("].forEach(x=>form.elements.default_video_model.
 
 
 FIXED_HTML = FIXED_HTML.replace('<button data-panel="comfy">ComfyUI 模型</button>', '<button data-panel="douyin-understanding">视频理解 LLM</button><button data-panel="comfy">ComfyUI 模型</button>')
-FIXED_HTML = FIXED_HTML.replace('<section id="comfy" class="panel">', '<section id="douyin-understanding" class="panel"><h2>视频理解 LLM</h2><p class="status">独立用于下载作品后的画面识别、内容分类和摘要。必须保存配置后才能使用，不会读取其他 LLM 配置或使用代码默认模型。请选择支持图片输入的模型；音频由本地 Whisper 转写。</p><form data-provider="douyin_understanding"><input type="hidden" name="id"><label>接口类型<select name="api_format" required><option value="">请选择接口类型</option><option value="ollama">Ollama 原生接口</option><option value="openai">OpenAI 兼容接口</option></select></label><label>API 地址<input name="base_url" required placeholder="填写模型服务 API 地址"></label><label>视觉模型<input name="model" required placeholder="填写已安装或已开通的视觉模型名称"></label><label>上下文窗口（tokens）<input name="context_window" type="number" min="4096" max="262144" step="1" value="16384" required></label><p class="status">Ollama 按此数值设置上下文窗口。OpenAI 兼容服务的窗口由服务端决定，此项不会改变其模型上限。窗口越大，占用内存/显存越多；更大窗口不保证处理更快。</p><label>API Key<input name="api_key" type="password" placeholder="留空保持原值；本地 Ollama 可不填"></label><label>本地语音转写模型<select name="transcription_model"><option value="tiny">tiny（最快）</option><option value="base">base</option><option value="small" selected>small（默认）</option><option value="medium">medium</option><option value="large-v3">large-v3（精度优先）</option></select></label><p class="status">转写使用 CPU，不占用视觉模型的显存。首次使用需下载转写模型到 cache/models/whisper。</p><button>保存视频理解配置</button><div class="status"></div></form></section><section id="comfy" class="panel">')
+FIXED_HTML = FIXED_HTML.replace('<section id="comfy" class="panel">', '<section id="douyin-understanding" class="panel"><h2>视频理解 LLM</h2><p class="status">独立用于下载作品后的画面识别、内容分类和摘要。必须保存配置后才能使用，不会读取其他 LLM 配置或使用代码默认模型。请选择支持图片输入的模型；音频由本地 Whisper 转写。</p><form data-provider="douyin_understanding"><input type="hidden" name="id"><label>接口类型<select name="api_format" required><option value="">请选择接口类型</option><option value="ollama">Ollama 原生接口</option><option value="openai">OpenAI 兼容接口</option></select></label><label>API 地址<input name="base_url" required placeholder="填写模型服务 API 地址"></label><label>视觉模型<input name="model" required placeholder="填写已安装或已开通的视觉模型名称"></label><label>上下文窗口（tokens）<input name="context_window" type="number" min="4096" max="262144" step="1" value="16384" required></label><p class="status">Ollama 按此数值设置上下文窗口。OpenAI 兼容服务的窗口由服务端决定，此项不会改变其模型上限。窗口越大，占用内存/显存越多；更大窗口不保证处理更快。</p><label>API Key<input name="api_key" type="password" placeholder="留空保持原值；本地 Ollama 可不填"></label><label>本地语音转写模型<select name="transcription_model"><option value="tiny">tiny（最快）</option><option value="base">base</option><option value="small" selected>small（默认）</option><option value="medium">medium</option><option value="large-v3">large-v3（精度优先）</option></select></label><p class="status">转写使用 CPU，不占用视觉模型的显存。首次使用需下载转写模型到 store/models/whisper。</p><button>保存视频理解配置</button><div class="status"></div></form></section><section id="comfy" class="panel">')
 
 FIXED_HTML = FIXED_HTML.replace('<option value="large-v3">large-v3（精度优先）</option>', '<option value="large-v3">large-v3（精度优先）</option><option value="large-v3-turbo">large-v3-turbo（速度与精度兼顾）</option>')
 
+MENTION_PANEL = '''<section id="mention-control" class="panel"><h2>@我自动回复</h2>
+<p>服务默认启动监听。需要 Chrome 插件已启用、抖音已登录，并配置视频理解 LLM。</p>
+<label>检查间隔（秒，30–600）<input id="mention-interval" type="number" min="30" max="600" value="60"></label>
+<label style="margin:16px 0"><input id="mention-auto" type="checkbox" checked style="width:auto"> 分析完成后自动回复原评论；关闭时仅生成草稿</label>
+<p>修改间隔或回复模式时，请先停止监听，再重新启动。停止会取消等待中的任务。</p>
+<button id="mention-start" type="button">开始监听</button> <button id="mention-stop" type="button">停止监听</button>
+<div id="mention-control-status" class="status" role="status" aria-live="polite">正在读取监听状态…</div>
+</section>'''
+MENTION_SCRIPT = '''
+let mentionInitialized=false;
+async function refreshMentionControl(){
+  try{
+    const r=await fetch('/api/mentions');const s=await r.json();if(!r.ok)throw new Error(s.error||'读取监听状态失败');
+    document.querySelector('#mention-start').disabled=s.enabled;
+    document.querySelector('#mention-stop').disabled=!s.enabled&&!s.autostart_pending;
+    document.querySelector('#mention-interval').disabled=s.enabled;
+    document.querySelector('#mention-auto').disabled=s.enabled;
+    if(!mentionInitialized){document.querySelector('#mention-interval').value=s.interval;document.querySelector('#mention-auto').checked=s.enabled?s.auto_reply:true;mentionInitialized=true;}
+    document.querySelector('#mention-control-status').textContent=(s.enabled?'监听中':s.autostart_pending?'自动监听等待配置':'已停止')+' · '+(s.auto_reply?'自动回复':'仅草稿')+' · 等待 '+s.queue.pending+' 条 · 处理中 '+s.queue.active+' 条'+(s.last_seen?' · 扩展最后连接：'+new Date(s.last_seen*1000).toLocaleTimeString():' · 等待扩展连接')+(s.error?' · '+s.error:'');
+  }catch(e){document.querySelector('#mention-control-status').textContent=e.message;}
+}
+async function changeMentionControl(action){
+  try{const r=await fetch('/api/mentions/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({autoReply:document.querySelector('#mention-auto').checked,interval:Number(document.querySelector('#mention-interval').value)})});const s=await r.json();if(!r.ok)throw new Error(s.error||'操作失败');await refreshMentionControl();}catch(e){document.querySelector('#mention-control-status').textContent=e.message;}
+}
+document.querySelector('#mention-start').onclick=()=>changeMentionControl('start');
+document.querySelector('#mention-stop').onclick=()=>changeMentionControl('stop');
+refreshMentionControl();setInterval(()=>{if(document.querySelector('#mention-control').classList.contains('active'))refreshMentionControl();},5000);
+'''
+FIXED_HTML = FIXED_HTML.replace('<button data-panel="comfy">', '<button data-panel="mention-control">@我自动回复</button><button data-panel="comfy">')
+FIXED_HTML = FIXED_HTML.replace('<section id="comfy" class="panel">', MENTION_PANEL + '<section id="comfy" class="panel">')
+FIXED_HTML = FIXED_HTML.replace('</script></body></html>', MENTION_SCRIPT + '</script></body></html>')
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
+    def proxy_mentions(self):
+        try:
+            body = self.rfile.read(int(self.headers.get('content-length', '0'))) if self.command == 'POST' else None
+            base = os.getenv('DOUYIN_SERVICE_URL', 'http://127.0.0.1:8101').rstrip('/')
+            req = request.Request(base + self.path, data=body, headers={'Content-Type':'application/json'}, method=self.command)
+            with request.urlopen(req, timeout=15) as response:
+                self.send_body(response.status, 'application/json; charset=utf-8', response.read())
+        except error.HTTPError as exc:
+            self.send_body(exc.code, 'application/json; charset=utf-8', exc.read())
+        except Exception:
+            self.send_body(502, 'application/json; charset=utf-8', json.dumps({'error':'抖音服务连接失败，请检查服务是否运行'}, ensure_ascii=False))
     def log_message(self, *_): return
     def send_body(self, status, content_type, body):
         body=body.encode() if isinstance(body,str) else body; self.send_response(status); self.send_header('content-type',content_type); self.send_header('content-length',str(len(body))); self.end_headers(); self.wfile.write(body)
     def do_GET(self):
-        if self.path=='/api/storage': self.send_body(200,'application/json; charset=utf-8',json.dumps(StorageConfigStore(Path('cache/video_creator/storage.json')).get(),ensure_ascii=False)); return
-        if self.path=='/api/cloudinary': self.send_body(200,'application/json; charset=utf-8',json.dumps(CloudinaryConfigStore(Path('cache/video_creator/cloudinary.json')).get(),ensure_ascii=False)); return
+        if self.path == '/api/mentions': self.proxy_mentions(); return
+        if self.path=='/api/storage': self.send_body(200,'application/json; charset=utf-8',json.dumps(StorageConfigStore(self.server.store_dir / 'storage.json').get(),ensure_ascii=False)); return
+        if self.path=='/api/cloudinary': self.send_body(200,'application/json; charset=utf-8',json.dumps(CloudinaryConfigStore(self.server.store_dir / 'cloudinary.json').get(),ensure_ascii=False)); return
         if self.path in ('/','/index.html'): self.send_body(200,'text/html; charset=utf-8',FIXED_HTML); return
         if self.path=='/api/providers': self.send_body(200,'application/json; charset=utf-8',json.dumps({'providers':self.server.store.list_public()},ensure_ascii=False)); return
         if self.path=='/api/models':
@@ -107,14 +153,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             models['comfy']=list(dict.fromkeys(models['comfy'])); self.send_body(200,'application/json; charset=utf-8',json.dumps(models,ensure_ascii=False)); return
         self.send_body(404,'text/plain','Not found')
     def do_POST(self):
+        if self.path in ('/api/mentions/start', '/api/mentions/stop'): self.proxy_mentions(); return
         if self.path=='/api/storage':
             try:
-                values=json.loads(self.rfile.read(int(self.headers.get('content-length','0')))); self.send_body(200,'application/json; charset=utf-8',json.dumps({'config':StorageConfigStore(Path('cache/video_creator/storage.json')).save(values)},ensure_ascii=False))
+                values=json.loads(self.rfile.read(int(self.headers.get('content-length','0')))); self.send_body(200,'application/json; charset=utf-8',json.dumps({'config':StorageConfigStore(self.server.store_dir / 'storage.json').save(values)},ensure_ascii=False))
             except Exception as exc: self.send_body(400,'application/json; charset=utf-8',json.dumps({'error':str(exc)}))
             return
         if self.path=='/api/cloudinary':
             try:
-                values=json.loads(self.rfile.read(int(self.headers.get('content-length','0')))); self.send_body(200,'application/json; charset=utf-8',json.dumps({'config':CloudinaryConfigStore(Path('cache/video_creator/cloudinary.json')).save(values)},ensure_ascii=False))
+                values=json.loads(self.rfile.read(int(self.headers.get('content-length','0')))); self.send_body(200,'application/json; charset=utf-8',json.dumps({'config':CloudinaryConfigStore(self.server.store_dir / 'cloudinary.json').save(values)},ensure_ascii=False))
             except Exception as exc: self.send_body(400,'application/json; charset=utf-8',json.dumps({'error':str(exc)}))
             return
         if self.path!='/api/providers': self.send_body(404,'text/plain','Not found'); return
@@ -127,5 +174,5 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except Exception as exc: self.send_body(400,'application/json; charset=utf-8',json.dumps({'error':str(exc)}))
 
 def main():
-    p=argparse.ArgumentParser(); p.add_argument('--host',default='127.0.0.1'); p.add_argument('--port',type=int,default=8103); p.add_argument('--cache-dir',type=Path,default=Path('cache/video_creator')); a=p.parse_args(); a.cache_dir.mkdir(parents=True,exist_ok=True); s=http.server.ThreadingHTTPServer((a.host,a.port),Handler); s.store=ProviderConfigStore(a.cache_dir.resolve()/'provider_configs.json'); s.comfy_url=os.getenv('COMFYUI_URL','http://127.0.0.1:8188'); print(f'admin listening=http://{a.host}:{a.port}',flush=True); s.serve_forever()
+    p=argparse.ArgumentParser(); p.add_argument('--host',default='127.0.0.1'); p.add_argument('--port',type=int,default=8103); p.add_argument('--cache-dir',type=Path,default=Path('cache/video_creator')); p.add_argument('--store-dir',type=Path,default=service_store('video_creator')); a=p.parse_args(); a.cache_dir.mkdir(parents=True,exist_ok=True); s=http.server.ThreadingHTTPServer((a.host,a.port),Handler); s.store_dir=a.store_dir.resolve(); s.store_dir.mkdir(parents=True,exist_ok=True); s.store=ProviderConfigStore(s.store_dir/'provider_configs.json'); s.comfy_url=os.getenv('COMFYUI_URL','http://127.0.0.1:8188'); print(f'admin listening=http://{a.host}:{a.port}',flush=True); s.serve_forever()
 if __name__=='__main__': main()
