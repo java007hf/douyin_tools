@@ -54,7 +54,7 @@ class UnderstandingTests(unittest.TestCase):
 
     def summary(self):
         return {"title": "预算", "format": "口播", "topic": "经济", "tags": ["消费"],
-                "summary": "作者讲述预算管理。", "key_points": ["比较价格"],
+                "summary": "作者讲述预算管理。", "comment_reply": "主要讲如何比较价格、安排家庭预算。", "key_points": ["比较价格"],
                 "timeline": [{"seconds": 2, "content": "比较价格"}], "limitations": ["抽帧采样"]}
 
     def test_transcript_chunks_keep_every_segment(self):
@@ -99,6 +99,9 @@ class UnderstandingTests(unittest.TestCase):
             result = understand_work("https://www.douyin.com/video/123", self.root, lambda *args: [video], TEST_CONFIG, lambda *args: None)
         self.assertEqual(result["transcript"], transcript)
         self.assertEqual(result["summary_basis"], "audio_primary")
+        self.assertEqual(result['comment_reply'], self.summary()['comment_reply'])
+        self.assertEqual(complete.call_count, 3)
+        self.assertIn('comment_reply字段', complete.call_args.args[0])
         self.assertIn("音频与画面或字幕冲突时以音频为准", complete.call_args.args[0])
         trace = json.loads((self.root / "task.json").read_text(encoding="utf-8"))
         self.assertEqual(trace["status"], "done")

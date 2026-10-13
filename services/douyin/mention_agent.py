@@ -82,6 +82,12 @@ class MentionAgent:
                     return value
                 analysis = await invoke('understanding', 'understand_video', {'url': row['source_url']})
                 row['analysis'] = analysis
+                from services.douyin.reply_style import COMMENT_REPLY_STYLE_VERSION, comment_reply_error
+                joint_reply = analysis.get('comment_reply')
+                if plan['intent'] == 'summary' and analysis.get('comment_reply_style_version') == COMMENT_REPLY_STYLE_VERSION and not comment_reply_error(joint_reply):
+                    progress('直接使用最终分析同时生成的口语回复')
+                    record('reuse_comment_reply', 'success', source='joint_summary', llm_calls=0)
+                    return analysis, joint_reply.strip()
                 tool = 'answer_video_question' if plan['intent'] == 'question' else 'summarize_video'
                 args = {'question': plan['question']} if plan['intent'] == 'question' else {}
                 reply = await invoke('reply', tool, args)
@@ -91,6 +97,10 @@ class MentionAgent:
             record('agent', 'success')
             return result
         except Exception as exc:
+            def details(error):
+                children = getattr(error, 'exceptions', None)
+                return '; '.join(details(child) for child in children) if children else str(error)
+            message = details(exc)
             trace['status'] = 'error'
-            record('agent', 'failed', error=str(exc))
-            raise
+            record('agent', 'failed', error=message)
+            raise RuntimeError(message) from exc
