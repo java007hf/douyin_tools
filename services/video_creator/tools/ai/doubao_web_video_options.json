@@ -1,0 +1,138 @@
+{
+  "seedance_v2.0_std": {
+    "ratio": [
+      {
+        "value": "auto",
+        "label": "自动"
+      },
+      {
+        "value": "3:4",
+        "label": "3:4"
+      },
+      {
+        "value": "4:3",
+        "label": "4:3"
+      },
+      {
+        "value": "9:16",
+        "label": "9:16"
+      },
+      {
+        "value": "16:9",
+        "label": "16:9"
+      },
+      {
+        "value": "1:1",
+        "label": "1:1"
+      },
+      {
+        "value": "21:9",
+        "label": "21:9"
+      }
+    ],
+    "min_duration": 4,
+    "max_duration": 15
+  },
+  "seedance_v2.0": {
+    "ratio": [
+      {
+        "value": "auto",
+        "label": "自动"
+      },
+      {
+        "value": "3:4",
+        "label": "3:4"
+      },
+      {
+        "value": "4:3",
+        "label": "4:3"
+      },
+      {
+        "value": "9:16",
+        "label": "9:16"
+      },
+      {
+        "value": "16:9",
+        "label": "16:9"
+      },
+      {
+        "value": "1:1",
+        "label": "1:1"
+      },
+      {
+        "value": "21:9",
+        "label": "21:9"
+      }
+    ],
+    "min_duration": 4,
+    "max_duration": 15
+  },
+  "seedance_v2.0_mini": {
+    "ratio": [
+      {
+        "value": "auto",
+        "label": "自动"
+      },
+      {
+        "value": "3:4",
+        "label": "3:4"
+      },
+      {
+        "value": "4:3",
+        "label": "4:3"
+      },
+      {
+        "value": "9:16",
+        "label": "9:16"
+      },
+      {
+        "value": "16:9",
+        "label": "16:9"
+      },
+      {
+        "value": "1:1",
+        "label": "1:1"
+      },
+      {
+        "value": "21:9",
+        "label": "21:9"
+      }
+    ],
+    "min_duration": 4,
+    "max_duration": 15
+  },
+  "seedance_v2.5": {
+    "ratio": [
+      {
+        "value": "auto",
+        "label": "自动"
+      },
+      {
+        "value": "3:4",
+        "label": "3:4"
+      },
+      {
+        "value": "4:3",
+        "label": "4:3"
+      },
+      {
+        "value": "9:16",
+        "label": "9:16"
+      },
+      {
+        "value": "16:9",
+        "label": "16:9"
+      },
+      {
+        "value": "1:1",
+        "label": "1:1"
+      },
+      {
+        "value": "21:9",
+        "label": "21:9"
+      }
+    ],
+    "min_duration": 4,
+    "max_duration": 30
+  }
+}

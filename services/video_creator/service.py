@@ -7,7 +7,11 @@ from urllib import parse, request
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from services.video_creator.tools.ai.comfyui_client import ComfyUIClient, ComfyUIError
 from services.video_creator.tools.ai.config_store import ProviderConfigStore
+from services.video_creator.tools.ai.mock_doubao import MockDoubaoImageProvider, MODEL as MOCK_DOUBAO_MODEL, image_models, image_model_status, KNOWN_IMAGE_MODELS
 from services.video_creator.tools.ai.providers import MiniMaxImageProvider, MiniMaxVideoProvider, ProviderError, SeedreamImageProvider, SeedanceProvider
+from services.video_creator.tools.ai.doubao_web_video import DoubaoWebVideoProvider, MODELS as DOUBAO_VIDEO_MODELS, OPTIONS as DOUBAO_VIDEO_OPTIONS, validate_video
+from services.video_creator.tools.ai.doubao_web import DoubaoWebImageProvider, OPTIONS as DOUBAO_WEB_OPTIONS
+from services.video_creator.tools.ai.generation_routes import image_generation_fields
 from services.video_creator.tools.ai.llm import LLMError, OpenAICompatibleLLM
 from services.video_creator.tools.video.extract_frames import extract_frames
 from services.video_creator.tools.video.keyframes import extract_boundary_frames
@@ -21,7 +25,7 @@ try: import oss2
 except ImportError: oss2=None
 
 
-def model_catalog(comfy_url: str) -> dict[str, list[str]]:
+def model_catalog(comfy_url: str, doubao_config: Path | None = None) -> dict[str, object]:
     models = {
         "minimax_image": ["image-01", "image-01-live"],
         "minimax_video": ["MiniMax-H3", "MiniMax-H3-Max"],
@@ -29,6 +33,7 @@ def model_catalog(comfy_url: str) -> dict[str, list[str]]:
         "seedance_video": ["doubao-seedance-2-0-pro", "doubao-seedance-2-0-fast", "doubao-seedance-2-0-mini", "doubao-seedance-1-5-pro-251215", "doubao-seedance-1-0-pro-250528"],
         "comfy": [],
         "comfy_video": [],
+        "mock_doubao_image": image_models(doubao_config or service_store("video_creator")/"mock_doubao.json"),
     }
     try:
         info = json.loads(request.urlopen(comfy_url + "/object_info", timeout=10).read())
@@ -42,6 +47,16 @@ def model_catalog(comfy_url: str) -> dict[str, list[str]]:
                         target.append(str(value))
     except Exception:
         pass
+    models["mock_doubao_video"] = list(DOUBAO_VIDEO_MODELS)
+    try:
+        video_config=json.loads((doubao_config or service_store("video_creator")/"mock_doubao.json").read_text(encoding="utf-8"))
+        video_ready=bool(video_config.get("web_video_request") and any(k.lower()=="cookie" and v for k,v in video_config.get("headers",{}).items()))
+    except (OSError,ValueError): video_ready=False
+    models["mock_doubao_video_status"]={name:{"configured":video_ready} for name in DOUBAO_VIDEO_MODELS}
+    models["mock_doubao_video_options"]={name:DOUBAO_VIDEO_OPTIONS[raw] for name,raw in DOUBAO_VIDEO_MODELS.items()}
+    models["mock_doubao_web_options"] = DOUBAO_WEB_OPTIONS
+    models["mock_doubao_image_status"] = image_model_status(doubao_config or service_store("video_creator")/"mock_doubao.json")
+    models["mock_doubao_image"] = list(dict.fromkeys(models["mock_doubao_image"] + list(KNOWN_IMAGE_MODELS)))
     models["comfy"] = list(dict.fromkeys(models["comfy"]))
     models["comfy_video"] = list(dict.fromkeys(models["comfy_video"]))
     models["comfy"] = [value for value in models["comfy"] if not any(token in value.lower() for token in ("minimax_h3", "qwen3vl", "qwen_2.5_vl", "video", "audio", "vae", "clip", "t5xxl"))]
@@ -162,6 +177,9 @@ def recover_comfy_jobs(server) -> None:
     except Exception:
         active=set()
     for job in server.jobs.list():
+        if job.get("status") in {"queued","running"} and job.get("provider_id")=="mock_doubao":
+            server.jobs.update(job["id"],status="error",message="服务重启，任务已中断",error="生成服务已重启；原请求可能已提交，请凭 provider_response 中的会话 ID 在豆包查询。未重复提交")
+            continue
         if job.get("status") not in {"queued","running"} or job.get("provider_id") != "local" or not job.get("prompt_id"):
             continue
         try:
@@ -204,7 +222,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json(200,{k:("********" if k=="api_key" and v else v) for k,v in config.items() if k not in {"secret","token"}}); return
         if path=="/api/cloudinary-config": self.send_json(200,cloudinary_config()); return
         if path=="/api/storage-config": self.send_json(200,storage_config()); return
-        if path=="/api/models": self.send_json(200,model_catalog(self.server.comfy_url)); return
+        if path=="/api/models": self.send_json(200,model_catalog(self.server.comfy_url, self.server.store_dir/"mock_doubao.json")); return
         if path=="/api/assets":
             # AI Video child jobs are internal production steps (asset renders and
             # shot renders). They remain queryable by id and visible in the parent
@@ -475,7 +493,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         key=f"ai-video/{job}/{uuid.uuid4().hex}{path.suffix.lower()}";bucket=oss2.Bucket(oss2.Auth(storage["access_key_id"],storage["access_key_secret"]),storage["endpoint"],storage["bucket"]);bucket.put_object(key,path.read_bytes());return storage["public_base_url"].rstrip("/")+"/"+key
                     def invoke(kind,fields,files,target):
                         provider_id=fields.get("provider_id","local")
-                        if provider_id!="local":
+                        selected_provider=self.server.providers.get(provider_id)
+                        if provider_id!="local" and provider_id!='mock_doubao' and (selected_provider or {}).get('provider')!='mock_doubao':
                             if files.get("reference_image") and not fields.get("image_url"): fields["image_url"]=public_url(files["reference_image"])
                             if files.get("reference_video") and not fields.get("video_url"): fields["video_url"]=public_url(files["reference_video"])
                         body,content_type=multipart_body(fields,files)
@@ -526,7 +545,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             ensure_non_dialogue_audio(clip,effect_text)
                         return clip
                     def generate_image(spec,ctx):
-                        fields={"provider_id":str(agent_config.get("default_image_provider_id") or "local"),"model":str(agent_config.get("default_image_model") or "flux"),"prompt":str(spec.get("prompt") or ctx.brief),"count":"1","aspect":"16:9","resolution":"2K"}
+                        fields=image_generation_fields(agent_config,spec,ctx.brief,self.server.providers.get(str(agent_config.get('default_image_provider_id') or '')))
                         asset_id="".join(char for char in str(spec.get("id") or uuid.uuid4().hex) if char.isalnum() or char in "-_") or uuid.uuid4().hex
                         return invoke("image",fields,{},task/f"asset_{asset_id}.png")
                     def keyframes(clip,shot,ctx): return extract_boundary_frames(clip,task/"keyframes"/str(shot["id"]))
@@ -606,7 +625,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             target=task/default; shutil.copyfile(source_path,target)
                             if field=="reference_image": image=target
                             else: video=target
-            params={k:str(form.getvalue(k) or "") for k in ("model","width","height","aspect","resolution","count","duration","frames","steps","negative","provider_id","image_url","video_url","reference_type","lora","lora_strength","seed","workflow_mode","library_asset_id")};params["library_asset_ids"]=library_asset_ids
+            params={k:str(form.getvalue(k) or "") for k in ("model","width","height","aspect","style","resolution","count","duration","frames","steps","negative","provider_id","image_url","video_url","reference_type","lora","lora_strength","seed","workflow_mode","library_asset_id")};params["library_asset_ids"]=library_asset_ids
             params["reference_image_2"]=image2.name if image2 else "";params["reference_count"]=len(reference_images);params["reference_asset_ids"]=library_asset_ids
             if kind == "video":
                 # A fixed seed lets ComfyUI return a cached result for an otherwise identical task.
@@ -620,10 +639,49 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 try: self.server.asset_library.add(image,name=str(getattr(form["reference_image"],"filename","") or prompt or "用户参考图")[:80],kind=str(params.get("reference_type") or "reference"),description={"prompt":prompt,"role":"user_reference"},source_type="upload",source_id=job)
                 except Exception: pass
             def run():
+                doubao_diagnostics={}
                 try:
                     self.server.jobs.update(job,status="running",message="正在连接生成服务",progress=5)
                     provider_id = params["provider_id"] or "local"
+                    provider_config=self.server.providers.get(provider_id) if provider_id not in {'local','mock_doubao'} else self.server.providers.get_by_provider('mock_doubao') if provider_id=='mock_doubao' else None
+                    if provider_config and provider_config.get('provider')=='mock_doubao':
+                        if provider_config.get('enabled') is False:raise ProviderError('豆包 mock Provider 已停用')
+                        params['model']=params.get('model') or provider_config.get('default_video_model' if kind=='video' else 'model') or ('mock_doubao_seedance_2_0_mini' if kind=='video' else MOCK_DOUBAO_MODEL)
                     model_name=params.get("model","").lower()
+                    if provider_id == "mock_doubao" or (provider_config or {}).get('provider')=='mock_doubao' or model_name.startswith("mock_doubao_"):
+                        if kind == "video":
+                            if len(reference_images)>1:raise ProviderError('豆包 I2V 仅支持一张参考图，不支持多图参考包')
+                            if params.get("image_url") or params.get("video_url"):
+                                raise ProviderError("当前豆包视频捕获仅验证文生视频，请移除云端参考素材 URL")
+                            self.server.jobs.update(job,provider_id=(provider_config or {}).get("id",provider_id),message="正在提交豆包视频",progress=15)
+                            def video_progress(trace):
+                                message=(f"豆包参考图上传：{trace['upload']['committed']}/{trace['upload']['expected']}" if trace.get('upload') and not trace.get('protocol') else "正在确认豆包视频参数" if trace.get('awaiting_confirmation') else "豆包视频渲染中，已查询 "+str(trace.get("polls",0))+" 次")
+                                self.server.jobs.update(job,message=message,provider_response=trace,progress=25)
+                            adapter=DoubaoWebVideoProvider(self.server.store_dir/"mock_doubao.json")
+                            urls=adapter.generate(effective_prompt,model=params.get("model"),aspect=params.get("aspect"),duration=params.get("duration"),image=image,video=video,diagnostics=doubao_diagnostics,progress=video_progress)
+                            outputs=[]
+                            for index,url in enumerate(urls):
+                                local=task/f"doubao_video_{index+1}.mp4"
+                                save_remote_asset(url,local)
+                                metadata=validate_video(local)
+                                outputs.append({"type":"video","href":f"/artifacts/generation_jobs/{job}/{local.name}",**metadata})
+                            self.server.jobs.update(job,status="done",message="豆包生视频完成",progress=100,outputs=outputs,provider_response=doubao_diagnostics)
+                            return
+                        self.server.jobs.update(job,provider_id=(provider_config or {}).get("id",provider_id),message="正在等待豆包生成图片",progress=15)
+                        private_config=json.loads((self.server.store_dir/"mock_doubao.json").read_text(encoding="utf-8"))
+                        adapter=(DoubaoWebImageProvider if private_config.get("web_request") else MockDoubaoImageProvider)(self.server.store_dir/"mock_doubao.json")
+                        def upload_progress(trace):
+                            self.server.jobs.update(job,message=f"豆包参考图上传：{trace['committed']}/{trace['expected']}，请保持 Chrome 豆包页已登录",progress=15,provider_response={**doubao_diagnostics,'upload':trace})
+                        if image and not reference_images:reference_images.append(image)
+                        if image2 and image2 not in reference_images:reference_images.append(image2)
+                        urls = adapter.generate(effective_prompt,image=image,reference_images=reference_images,model=params.get("model") or MOCK_DOUBAO_MODEL,count=params.get("count"),style=params.get("style"),aspect=params.get("aspect"),diagnostics=doubao_diagnostics,progress=upload_progress)
+                        outputs=[]
+                        for index,url in enumerate(urls):
+                            local=task/f"doubao_image_{index+1}.png"
+                            save_remote_asset(url,local)
+                            outputs.append({"type":"image","href":f"/artifacts/generation_jobs/{job}/{local.name}"})
+                        self.server.jobs.update(job,status="done",message="豆包生图完成",progress=100,outputs=outputs,provider_response=doubao_diagnostics)
+                        return
                     if provider_id == "local" and (model_name.startswith("image-") or model_name.startswith("doubao-seedream") or model_name.startswith("doubao-seedance")):
                         provider_name="minimax" if model_name.startswith("image-") else "seedance"; configured=self.server.providers.get_by_provider(provider_name)
                         if configured: provider_id=configured["id"]; params["provider_id"]=provider_id; self.server.jobs.update(job,provider_id=provider_id,params=params)
@@ -643,7 +701,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             else: raise ProviderError("当前 Provider 不支持生图")
                             outputs=[]
                             for index,url in enumerate(urls):
-                                local=task/f"cloud_image_{index+1}."+((parse.urlsplit(url).path.rsplit('.',1)[-1].lower()) if '.' in parse.urlsplit(url).path.rsplit('/',1)[-1] else 'png')
+                                local=task/(f"cloud_image_{index+1}."+((parse.urlsplit(url).path.rsplit('.',1)[-1].lower()) if '.' in parse.urlsplit(url).path.rsplit('/',1)[-1] else 'png'))
                                 if local.suffix not in {".jpg",".jpeg",".png",".webp"}: local=local.with_suffix(".png")
                                 save_remote_asset(url,local); outputs.append({"type":"image","href":f"/artifacts/generation_jobs/{job}/{local.name}"})
                             self.server.jobs.update(job,status="done",message="生图完成",progress=100,outputs=outputs); return
@@ -696,7 +754,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                     outputs.append({"type":"video" if is_video else "image","href":"/api/comfy-view?"+parse.urlencode(item)})
                     if not outputs: raise ComfyUIError("ComfyUI 完成但没有返回可展示的输出")
                     self.server.jobs.update(job,status="done",message="生成完成",progress=100,outputs=outputs)
-                except Exception as exc: self.server.jobs.update(job,status="error",message="生成失败",error=str(exc))
+                except Exception as exc: self.server.jobs.update(job,status="error",message="生成失败",error=str(exc),**({"provider_response":doubao_diagnostics} if doubao_diagnostics else {}))
             threading.Thread(target=run,daemon=True).start(); self.send_json(202,{"ok":True,"jobId":job})
         except Exception as exc: self.send_json(400,{"error":str(exc)})
 

@@ -1,0 +1,184 @@
+{
+  "model": [
+    {
+      "label": "专业出图・4 倍消耗",
+      "value": "Seedream 5.0 Pro"
+    },
+    {
+      "label": "智能理解升级，画面细节丰富",
+      "value": "Seedream 5.0 Lite"
+    },
+    {
+      "label": "多图精准参考，人像更加自然",
+      "value": "Seedream 4.5"
+    },
+    {
+      "label": "精准指令编辑，高度特征保持",
+      "value": "Seedream 4.0"
+    },
+    {
+      "label": "专业快速",
+      "value": "Seedream 5.0 Flash"
+    }
+  ],
+  "ratio": [
+    {
+      "label": "自动",
+      "value": "auto"
+    },
+    {
+      "label": "1:1",
+      "value": "1:1"
+    },
+    {
+      "label": "2:3",
+      "value": "2:3"
+    },
+    {
+      "label": "3:4",
+      "value": "3:4"
+    },
+    {
+      "label": "4:3",
+      "value": "4:3"
+    },
+    {
+      "label": "9:16",
+      "value": "9:16"
+    },
+    {
+      "label": "16:9",
+      "value": "16:9"
+    }
+  ],
+  "style": [
+    {
+      "label": "人像摄影",
+      "value": "skill_image_styles_portrait"
+    },
+    {
+      "label": "电影写真",
+      "value": "skill_image_styles_film"
+    },
+    {
+      "label": "中国风",
+      "value": "skill_image_styles_chinese"
+    },
+    {
+      "label": "动漫",
+      "value": "skill_image_styles_japanese_anime"
+    },
+    {
+      "label": "3D渲染",
+      "value": "skill_image_styles_3d"
+    },
+    {
+      "label": "赛博朋克",
+      "value": "image_gen_style_cyberpunk"
+    },
+    {
+      "label": "CG 动画",
+      "value": "skill_image_styles_cg"
+    },
+    {
+      "label": "水墨画",
+      "value": "skill_image_styles_ink_wash_painting"
+    },
+    {
+      "label": "油画",
+      "value": "skill_image_styles_oil_painting"
+    },
+    {
+      "label": "古典",
+      "value": "skill_image_styles_classic"
+    },
+    {
+      "label": "水彩画",
+      "value": "skill_image_styles_watercolor"
+    },
+    {
+      "label": "卡通",
+      "value": "skill_image_styles_cartoon"
+    },
+    {
+      "label": "平面插画",
+      "value": "skill_image_styles_flat_illustration"
+    },
+    {
+      "label": "风景",
+      "value": "skill_image_styles_landscape"
+    },
+    {
+      "label": "港风动漫",
+      "value": "skill_image_styles_hongkong_anime"
+    },
+    {
+      "label": "像素风格",
+      "value": "skill_image_styles_pixel_style"
+    },
+    {
+      "label": "荧光绘画",
+      "value": "skill_image_styles_fluorescence"
+    },
+    {
+      "label": "彩铅画",
+      "value": "skill_image_styles_colored_pencil"
+    },
+    {
+      "label": "手办",
+      "value": "skill_image_styles_figure"
+    },
+    {
+      "label": "儿童绘画",
+      "value": "skill_image_styles_children_illustration"
+    },
+    {
+      "label": "抽象",
+      "value": "skill_image_styles_abstract"
+    },
+    {
+      "label": "锐笔插画",
+      "value": "skill_image_styles_sharp_illustration"
+    },
+    {
+      "label": "二次元",
+      "value": "skill_image_styles_acg"
+    },
+    {
+      "label": "油墨印刷",
+      "value": "skill_image_styles_ink_print"
+    },
+    {
+      "label": "版画",
+      "value": "skill_image_styles_bnw_printing"
+    },
+    {
+      "label": "莫奈",
+      "value": "skill_image_styles_monet"
+    },
+    {
+      "label": "毕加索",
+      "value": "skill_image_styles_picasso"
+    },
+    {
+      "label": "伦勃朗",
+      "value": "skill_image_styles_rembrandt"
+    },
+    {
+      "label": "马蒂斯",
+      "value": "skill_image_styles_matisse"
+    },
+    {
+      "label": "巴洛克",
+      "value": "skill_image_styles_baroque"
+    },
+    {
+      "label": "复古动漫",
+      "value": "skill_image_styles_oldschool"
+    },
+    {
+      "label": "绘本",
+      "value": "skill_image_styles_picturebook"
+    }
+  ]
+}

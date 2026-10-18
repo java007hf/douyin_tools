@@ -358,3 +358,261 @@ $env:CLOUDINARY_UPLOAD_PRESET="你的 unsigned upload preset"
 默认持久目录为项目根目录下的 `store/`。网关可用 `--store-dir` 或环境变量 `DOUYIN_STORE_DIR` 指定根目录；单独启动 Tab 时，其 `--store-dir` 指向对应服务子目录。ASR 模型默认在 `store/models/whisper/`，可通过 `DOUYIN_ASR_MODEL_DIR` 单独覆盖。原 `--cache-dir` 仅用于临时数据，不再决定配置/数据库位置。
 
 标准网关启动会在启动子服务前迁移旧 `cache/douyin`、`cache/video_creator` 中已知的持久数据，保持媒体 URL、数据库关系和历史记录。迁移前须停止所有服务；已有同名目标时会明确报错，不覆盖已有数据。诊断及测试目录不会迁入 `store/`。
+
+### 豆包网页请求生图
+
+生图模型列表新增 `豆包网页 / mock_doubao_seedream`，使用独立基础工具
+`services/video_creator/tools/ai/mock_doubao.py`，通过现有 `/api/generate-image`
+任务接口执行，完成后将图片下载到 `store/video_creator/generation_jobs/<task-id>/`。
+任务沿用现有进度、错误和资产 Feed。此名称表示请求通道，不代表可任意指定
+Seedream 版本；实际模型由捕获的豆包请求决定。
+
+私有配置位于 `service_store("video_creator") / "mock_doubao.json"`，遵循
+`DOUYIN_STORE_DIR` / 服务 `--store-dir`。配置包含 `base_url`、`endpoint`、
+`headers`、`query`、`body` 和 `timeout`（秒，默认 180，最高 600）。
+`body` 当前支持实验脚本的 Android `uplink_body.send_message_body` 协议，
+其中 `content` 是包含 `text` 的 JSON 字符串。网页协议若不同，需要新增对应适配，
+不能直接替换 body。请从自己已登录的有效请求更新完整模板与凭据，保留设备字段和
+签名的原始对应关系；工具仅更新消息 UUID、时间与提示词，不伪造或刷新认证签名。
+配置不会通过公开 Provider API 返回，不能提交到 Git。
+
+当前仅支持文生图，不支持本地参考图上传。表单数量设为 1；这代表一次请求，
+豆包可能返回多张图片。比例、分辨率及实际出图数量由请求模板/豆包端决定，
+不保证服从表单参数。网络失败、登录失效、空结果均终止任务；生成 POST 不会
+自动重试，避免重复生成。更新配置后新任务立即读取，无需重启。
+
+独立验证只提交一次并保存图片：
+
+```powershell
+python -B -m services.video_creator.tools.ai.mock_doubao "生成一只可爱的小猫咪"
+# 本机原实验入口也保留为兼容脚本：
+python -B cache/test.py "生成一只可爱的小猫咪"
+python -B -m unittest services.video_creator.tests.test_mock_doubao services.video_creator.tests.test_providers
+```
+
+2026-10-15：解析及 Provider 回归测试通过；用迁移的旧请求模板进行一次真实请求，
+豆包返回业务错误，未取得图片。仍需有效的登录请求模板完成在线验收。
+
+后台控制的「豆包网页登录」提供凭据更新入口：可单独更新 Token、Cookie，
+或粘贴请求头 JSON / 完整配置 JSON。设置页回填已有凭据，Token / Cookie 支持显示与隐藏，留空保留已有值；
+完整模板中提供的部分会替换对应配置，因此更新签名和设备参数时应成套粘贴。
+保存会校验模板并原子写入持久配置，下次生成立即使用，不会自动提交测试生图。
+“已配置”仅代表存在配置，不代表登录仍有效。
+
+
+### 豆包多模型与网页视频协议调查（2026-10-15）
+
+登录后的豆包图像生成菜单实查：Seedream 5.0 Flash（专业快速）、Seedream 5.0 Pro
+（专业出图，4 倍消耗）、Seedream 4.5（日常生成）、Seedream 4.0（基础生图）。
+生图列表展示对应 mock 模型；尚未配置真实请求差异的选项标记“待绑定请求”并禁用。
+原来的 `mock_doubao_seedream` 仅表示旧模板默认通道，不能确定其具体 Seedream 版本。
+
+后台控制 → 豆包网页登录 → 生图模型路由：保存 `model_routes` 对象，每个键为
+`mock_doubao_` 开头的小写英文/数字/下划线标识；值包含 `enabled`（可选）和
+`request`。`request` 中的 `body`、`query`、`headers`、`base_url`、`endpoint`
+递归覆盖原模板；列表整体替换，JSON 字符串不做猜测解析。新增路由必须实际改变请求，
+不能只增加别名。模型目录动态读取配置，重新打开/刷新生图页即可加载。
+例如真实抓包确认某个模型的 `ext.input_skill` 后，可在其路由的
+`request.body.uplink_body.send_message_body.ext.input_skill` 保存完整字符串。
+这里不提供未经抓包证实的模型参数值。当前执行器仍只支持 Android send_message_body
+协议，网页 Samantha 协议需要另外适配，不能直接把网页请求粘成该 body。
+
+公开前端源码已确认的生视频线索（不是端到端验收）：
+
+- `/samantha/skill/pack`：POST，接收 `skill_type` 与 `condition`；前端视频技能值为 17，
+  图像技能值为 3。视频配置从 `data.video_generation.meta.option_list` 读取，另有
+  `model_capability` / `model_input_rule` 相关配置，不能用图像模型列表代替。
+- 视频输入组件构造 `ext.input_skill` JSON，包含 `skill_id`、`skill_type` 和
+  `variables`；旧输入组件能看到 `ratio`、`camera_movement`。具体模型键和现代输入
+  协议仍需有效网络请求确认；展示名称及埋点字段不能直接视为执行参数。
+- `/samantha/video/query_video_gen_info`：前端 API 声明的 POST 无请求体。尚未确认它
+  返回账号额度、队列还是任务状态，不能将它当作按任务 ID 查询的接口实现。
+- `/samantha/video/get_play_info`：POST 接收 `vid`，用于获取播放信息；实际下载字段、
+  URL 有效期、是否需鉴权仍待响应确认。
+- 网页协议存在 `messageToSamanthaChatMessage` 转换，当前 Android
+  `/im/sse/send/message` 适配器不能仅改模型名就用于网页视频。
+
+可行接入需要先捕获有效网页会话中的模型配置、单次生成提交、流式/轮询状态和
+播放信息响应；明确任务 ID/会话 ID/消息 ID、队列进度、终态、失败和取消协议后，
+再实现独立 VideoProvider，持续监控并下载到 generation_jobs，验证视频可解码。
+图生视频还需要真实上传协议与素材 key 绑定。生成提交保持单次，未知结果不自动重发。
+本次没有提交任何视频生成，也没有把尚未验证的 mock 视频选项开放为可用模型。
+未携带网页会话的 skill/pack 探测返回 code 710012001（login invalid）；
+内置浏览器能读取登录后的模型菜单，但当前提供的浏览器接口不支持网络抓包。
+
+源码证据来自 https://www.doubao.com/chat/ 当日引用的官方静态资源，研究快照仅放在
+`cache/doubao_research/`：`im.js`（API 定义）、`e3.js`（视频配置解析）、
+`po.js`（图像输入）、`t0d.js`（视频输入）、`74.js`（Samantha 转换）。
+
+
+2026-10-17 原始脚本兼容性复核：保留用户恢复的 cache/test.py，另备份至
+cache/doubao_baseline/test.original.20261017.py。固定时间、随机数和 UUID 后，
+新请求构造器与原脚本的 URL、全部请求头及请求体逐项相等；恢复 9 个动态请求头、
+四位随机后缀 _rticket、随机 iid、原始查询拼接和秒级 create_time_ms 规则。
+签名的固定片段仍取自私有模板，此逻辑不代表更新认证签名或续期登录。
+原始脚本当前单次线上基线返回 HTTP 200，但 ACK status_code=710022002
+（当前服务访问频繁，请稍后重试），图片数为 0；原脚本仅依据 HTTP 状态报告 success。
+服务现在识别 status_code/status_desc，不把 HTTP 200 当成生成成功；遇到限流停止提交。
+请求一致性报告在 cache/doubao_baseline/parity.json，基线响应保存在
+store/video_creator/generation_jobs/doubao_baseline_1792199295/。
+
+
+豆包功能采用分阶段验收，禁止只凭单元测试或 HTTP 200 宣布出图完成：
+
+```powershell
+python -B -m services.video_creator.tools.ai.verify_doubao --prompt "生成一只可爱的小狗的图片"
+```
+
+诊断器直接调用原始 `cache/test.py` 一次，不调用会重复发送的批量 main。
+先检查业务状态、原脚本提取的图片地址，并实际下载/解码图片；脚本阶段失败即停止，
+不提交工程生成。脚本通过后才比较原脚本和工程模板，并用相同提示词通过工程 HTTP API
+提交一次任务、监控终态并下载/验证工程产物。`--baseline-only` 可只验原脚本。
+报告和真实图片保存在 `store/video_creator/generation_jobs/test_py_verify_<id>/`，
+不记录凭据和完整请求。参数扩展必须先在脚本阶段用真实已确认字段验证，再迁入工程；
+没有确认的参数保持跳过。若原脚本可出图而工程失败，应首先判为工程集成问题进行对照排查。
+2026-10-17 本次基线仍收到业务码 710022002，图片数 0，工程阶段跳过。
+
+
+### 豆包网页生图：真实 HAR/cURL 验收（2026-10-17）
+
+网页实际使用 `POST https://www.doubao.com/chat/completion`，与原 Android
+`/im/sse/send/message` 协议不同。`DoubaoWebImageProvider` 仅在私有配置存在
+`web_request` 时启用，错误时不会回退或重复提交旧协议。原始 cache/test.py 保持不动。
+
+真实请求参数位置：外层 `chat_ability.ability_type=3`；
+`chat_ability.ability_param` 是 JSON 字符串，内含 `ability_type=1` 和
+`ability_param.model/style/ratio/input_box_content`。风格使用真实元数据的 key，
+例如 `skill_image_styles_3d`、`skill_image_styles_watercolor`；可选项保存在
+`services/video_creator/tools/ai/doubao_web_options.json`，不含账号或签名缩略图。
+消息文本与 input_box_content 同步更新。新生成必须更新消息/本地会话/unique_key，
+重放旧 ID 可能只收到结束事件。保留空的可选 ID，不凭空填充未知参数。
+
+用户提供的 cURL 包含完整 Cookie，但中文已丢失为空格。初次验证仅用同条 HAR 的
+原始中文恢复这些文本字段，保留 cURL 的实际 Cookie、URL 和其他请求头。
+原始 cURL 不作为 shell 执行，凭据写入 store，普通任务记录不保存凭据。
+Admin 的 Cookie 字段用于更新网页会话；「已验证的网页生图请求」可编辑完整
+`web_request`，包含 url、headers、body。旧 Android 模板仍保留。
+
+按用户要求先独立脚本再工程验证：
+
+- 独立 `cache/test_har.py` 新请求：Flash + 3D + 9:16，生成并下载 1520×2720 图片。
+- 独立脚本比例改为 1:1：生成并下载 2048×2048 图片。
+- 独立脚本改为水彩画：生成并下载新的 2048×2048 图片。
+- 固定时间与 UUID 后，工程与独立脚本的 URL、请求头、完整 body 逐项相等。
+- 工程 HTTP 接口同输入任务 `180b4c26ad4f4371afbd41196b7b1091` 到达 done，
+  SSE_REPLY_END 完整，已下载并解码 2048×2048 水彩小狗。
+
+工程报告：`store/video_creator/generation_jobs/180b4c26ad4f4371afbd41196b7b1091/verification.json`。
+其他模型名称按 HAR 元数据和实际捕获字段映射，尚未逐个进行在线出图验收。
+生图页面增加真实风格选项，比例送入结构化参数；清晰度显示为豆包自动（模板），
+生成数量 1 表示一次请求。参考图上传尚未捕获；视频协议接入见下节。
+
+### 豆包网页视频：真实 HAR 验证（2026-10-17）
+
+根据 `cache/video.har` 接入独立的 `doubao_web_video.py`。视频提交仍是
+`/chat/completion`，但 `chat_ability.ability_type=17`，`ability_param` 直接包含
+`model`、`ratio`、`duration`、`input_box_content`，与生图的嵌套结构不同。
+提交流返回 `SSE_ACK` 的会话 ID 后，通过捕获的 `/im/chain/single` 请求每 10 秒
+查询该会话，只从已完成的 `creation_block.creations[type=2].video` 读取下载地址。
+`SSE_REPLY_END` 只表示提交回复结束，不表示视频已生成。
+
+生视频菜单增加：
+
+| 网页模型 | 工程模型 | 时长 |
+| --- | --- | --- |
+| Seedance 2.0 Mini | `mock_doubao_seedance_2_0_mini` | 4–15 秒 |
+| Seedance 2.0 Fast | `mock_doubao_seedance_2_0_fast` | 4–15 秒 |
+| Seedance 2.0 | `mock_doubao_seedance_2_0` | 4–15 秒 |
+| Seedance 2.5 | `mock_doubao_seedance_2_5` | 4–30 秒 |
+
+模型标识、比例与时长范围均取自 HAR 的网页菜单配置，只有 Mini 做了在线生成验证。
+清晰度由豆包控制。现已支持文生视频和单张参考图 I2V；参考视频与多图参考包仍明确拒绝。
+后台「豆包网页登录」的 `web_video_request` 分别保存 submit/poll、i2v_submit/confirm 模板，
+共用 Cookie 更新入口并支持凭据回显。完整请求仅保存在私有 store 配置，任务记录
+保存会话 ID、查询次数和状态，不保存 Cookie 或签名 URL。
+
+先运行独立 `cache/test_video_har.py`，再进行工程 HTTP 验证。独立 Mini 测试
+`video_har_test_917555ec0bd4428babc431ba482a3a13` 已下载并解码 1280×720、
+24 fps、241 帧视频，记录在对应 `store/video_creator/generation_jobs/` 目录。
+首次独立测试收到“确认参数”回复，未开始渲染；使用明确直接生成的提示词后成功。
+工程会识别该回复并结束等待、说明原因，不会把确认回复或 HTTP 200 当成成片。
+生成提交不自动重试；查询最多等待 30 分钟，重启时将未完成任务标为中断并保留会话 ID。
+
+工程 `/api/generate-video` 验收任务 `266337c2e7784579b3ace26243a88861` 已到达
+done，经 17 次会话查询取得 1280×720、24 fps、约 10 秒成片；网关媒体地址返回
+HTTP 200、video/mp4，已解码并查看中间帧。验收记录及视频保存在对应任务目录。
+
+
+### 两参考图 i2i 独立验收（2026-10-18）
+
+`cache/test_i2i_har.py` 按 `cache/i2i_v2.har` 的实际附件结构，使用两张已上传的
+参考图 URI 提交一次新的 Seedream 5.0 Flash 请求。任务
+`i2i_har_test_63d8520f36c14db1b3671b475ddc1868` 成功返回 1344×1792 图片，
+158 个事件、完整 SSE_REPLY_END、无业务错误，下载文件可解码并已人工查看。
+结果及 verification.json 保存在对应 store/video_creator/generation_jobs 目录。
+这只验证已上传 URI 的两参考图生成；插件新图片上传尚未通过在线验收，不代表网页
+参考图上传入口已接入完成。上传桥接支持重复 --image 参数，逐张提交并等前一张
+commit 成功后才发送下一张。
+
+
+两张新图片上传与 i2i 续验（2026-10-18）：上传桥接记录
+`1af9c1d448b344c1a784921dbb896581` 的两个本地参考图均取得新 URI 并 commit 成功。
+仅一张具有明确 Python 上传 HTTP 200 记录，另一张上传传输未被 Python 记录，
+因此不能称为两张均由 Python 传输。使用这两个新 URI 的独立生成任务
+`i2i_har_test_46a524321fa54344862239b59dc33924` 已成功，74 个事件、完整流结束、
+无业务错误，下载并解码 1536×1536 结果。工程网页表单尚未接入这个诊断桥接。
+
+
+0.1.7 双图完整链路验收通过（2026-10-18）：
+上传报告 `dcf99fa80ea54573bf6dc441db1e58fd` 记录两次 Python 上传 HTTP 200，
+两个不同图片 URI commit 成功，state=done；不存在原生上传回退。
+使用这两个新 URI 的独立 i2i 任务 `i2i_har_test_afceb39ec2514fec8f1727f90ebba762`
+已成功生成并下载 1536×1536 图片，SSE_REPLY_END 完整，无业务错误，已解码查看。
+这是浏览器申请/提交 + Python 传输 + Python i2i 的独立脚本验收，工程网页参考图表单
+仍未接入该诊断桥接，不得将其描述为网页工程端到端验收完成。
+
+
+### 网页表单与 AI视频的豆包 Mock Provider
+
+控制台新增「豆包 Mock Provider」，仅保存配置 ID、名称、默认模型和启用状态；
+网页登录 Cookie 与签名请求模板仍由「豆包网页登录」统一维护，不复制到任务或
+Provider 普通响应中。控制台 AI视频 → 默认生图 Provider 可选择该配置及对应
+`mock_doubao_seedream_*` 模型，不会借用普通提示词辅助 LLM 的凭据。
+
+生图表单选择豆包模型后，可用原参考图和「第二张参考图」上传 1–2 张图，也可选资产；
+本地上传与资产合计最多 2 张。上传使用已登录 Chrome 的豆包上传插件，页面自动连接，
+不需要手选图片或点击启动。多次上传串行执行，完整记录 Python 传输和 commit；
+失败时不提交生成请求。图片与任务结果仍保存在持久 store。
+
+工程集成插件需 0.1.10：自动复用/打开图像创作标签，在每次派发前注入当前脚本，
+等待上传组件，并优先选择图片专用或更明确的附件输入框。请求仍完全使用实际抓包
+确认的 attachment_block 和独立文本 message；全部 message/block ID 都重新生成。
+
+AI视频资产生图路由已用实际 Provider 配置 ID 实测任务
+`b0d406ed21a348fba8af7fc92e9b6197`，生成并解码 2720×1520 道具参考图。
+这验证资产生图工具的配置路由，不代表运行了一次完整故事板、视频生成和合成。
+
+
+网页表单的工程 HTTP 双参考图验收已通过：任务
+`73f8d9f55a5d425f867885158683276b` 使用豆包 Mock Provider 配置 ID，两个文件字段
+reference_image/reference_image_2 经实际插件上传，各有 Python HTTP 200 和 commit。
+Provider 返回完整 SSE_REPLY_END，任务 done，网关图片 HTTP 200 并成功解码。
+验收记录保存在该任务目录的 verification.json。图像创作页同时具有多图参考入口与
+单图编辑入口，插件优先选择 multiple 的参考图入口；相同优先级才报告歧义。
+
+### 豆包 Mock T2V / I2V（2026-10-18）
+
+生视频选择豆包 Mock 模型，不传图片走 T2V，上传一张图片或选择一个图片资产走 I2V。
+I2V 自动通过已登录 Chrome 的上传插件申请凭据，由 Python 传输图片，再提交豆包视频请求。
+控制台 Mock Provider 可设置默认视频模型；AI视频的 T2V、I2V 路由可分别选用该 Provider。
+凭据继续使用独立网页登录配置，不复制进任务。参考视频和多图参考包暂不支持。
+
+请求来自真实 video.har / i2v.har，确认消息使用已捕获的 confirm 模板，核对模型、时长、比例及消息游标后最多发送一次。
+只读轮询每 10 秒进行，最长 30 分钟；生成 POST 不自动重试。完成后下载并验证视频可解码。
+Mini、Fast、标准 2.0 和 2.5 的模型选择来自实际网页配置；此次在线验收使用 Mini，其余模型尚未逐一生成验收。
+
+独立 I2V 脚本任务 `video_har_test_b3134f1943a144c68ee6282db4bcfae5` 已完成 10 秒视频。
+工程 HTTP 验收 T2V `11467faa9bd040bf80d51bbf42ae7fb1` 和 I2V `598b4b07b17b44cf82e597de998ae770`
+均完成 4 秒、24 fps 视频；后者上传报告记录 uploaded=1、committed=1。
+成片和验收 JSON 保存在各自 `store/video_creator/generation_jobs/<任务ID>/`。
+T2V 本次提交 1:1 但实际返回 1280×720；I2V 返回 720×720。豆包可能调整比例，实际输出尺寸为准。

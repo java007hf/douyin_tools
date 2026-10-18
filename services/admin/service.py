@@ -7,6 +7,7 @@ from urllib import request, error
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from services.video_creator.tools.ai.config_store import ProviderConfigStore
 from services.core.storage import service_store
+from services.video_creator.tools.ai.mock_doubao_config import MockDoubaoConfigStore
 from services.video_creator.workflow.prompts import DEFAULT_REVIEW_PROMPT, DEFAULT_STORYBOARD_PROMPT
 
 class CloudinaryConfigStore:
@@ -121,6 +122,28 @@ FIXED_HTML = FIXED_HTML.replace('<section id="comfy" class="panel">', MENTION_PA
 FIXED_HTML = FIXED_HTML.replace('</script></body></html>', MENTION_SCRIPT + '</script></body></html>')
 
 
+DOUBAO_PANEL = '''<section id="mock-doubao" class="panel"><h2>豆包网页登录凭据</h2>
+<p class="status">供 mock_doubao_seedream 生图使用。凭据过期后，在此更新自己的有效请求配置。保存后下次生成立即生效。</p>
+<form id="mock-doubao-form" autocomplete="off"><div class="grid">
+<label>请求地址<input name="base_url" type="url" required></label>
+<label>请求路径<input name="endpoint" required></label>
+<label>X-Tt-Token<input name="token" type="password" autocomplete="new-password" placeholder="留空保持原值"></label>
+<label>Cookie<input name="cookie" type="password" autocomplete="new-password" placeholder="留空保持原值"></label>
+<label>请求超时（秒）<input name="timeout" type="number" min="1" max="600" value="180" required></label>
+</div><button type="button" id="doubao-reveal">显示 Token / Cookie</button><p class="status">Token 或 Cookie 未必足够；如请求签名、设备参数也已过期，请同时更新请求头或完整模板。已保存凭据会回填，可切换显示或隐藏；空白字段保持原值。</p>
+<label>更新请求头（JSON，可选）<textarea name="headers" spellcheck="false" placeholder='{"X-Tt-Token":"新的登录 Token"}'></textarea></label>
+<label>生图模型路由（JSON）<textarea name="model_routes" spellcheck="false" placeholder='{"mock_doubao_自定义英文标识":{"request":{"body":{}}}}'></textarea></label><p>每个模型需填写从真实请求确认的差异参数。名称仅支持 mock_doubao_ 加小写英文、数字、下划线；request 支持 body、query、headers、base_url、endpoint，按字段递归覆盖默认模板。不要只改名称；保存后重新打开生图页加载模型列表。</p><details><summary>已验证的网页生图请求</summary><p>由实际 cURL 导入的 /chat/completion 报文。Cookie 字段用于更新网页登录会话；此处保留 URL、其余请求头和 body。启用网页模板后不回退到旧 Android 请求。</p><label>网页请求 web_request（JSON）<textarea name="web_request" spellcheck="false" placeholder="{}"></textarea></label></details><details><summary>已验证的网页视频请求</summary><p>submit 是提交模板，poll 是会话查询模板。视频复用上方 Cookie。</p><label>web_video_request（JSON）<textarea name="web_video_request" spellcheck="false"></textarea></label></details><details><summary>完整请求模板（JSON）</summary><p>支持网页 web_request、web_video_request 及旧协议 headers、query、body；不会刷新签名。</p><label>请求配置<textarea name="request_config" spellcheck="false" placeholder='{"base_url":"https://api5-normal-lf.doubao.com","endpoint":"/im/sse/send/message","headers":{},"query":{},"body":{}}'></textarea></label></details>
+<button type="submit">保存豆包登录配置</button><div class="status" role="status" aria-live="polite"></div></form></section>'''
+FIXED_HTML = FIXED_HTML.replace('<button data-panel="comfy">', '<button data-panel="mock-doubao">豆包网页登录</button><button data-panel="comfy">')
+FIXED_HTML = FIXED_HTML.replace('<section id="comfy" class="panel">', DOUBAO_PANEL + '<section id="comfy" class="panel">')
+FIXED_HTML = FIXED_HTML.replace('</body>', '<script src="/assets/mock_doubao.js"></script></body>')
+
+
+# Mock Provider references the shared private Doubao session; no duplicate credentials.
+FIXED_HTML=FIXED_HTML.replace('<button data-panel="comfy">ComfyUI 模型</button>', '<button data-panel="doubao-provider">豆包 Mock Provider</button><button data-panel="comfy">ComfyUI 模型</button>')
+FIXED_HTML=FIXED_HTML.replace('<section id="comfy" class="panel">', '''<section id="doubao-provider" class="panel"><h2>豆包 Mock Provider</h2><p>供直接生图及 AI视频生成资产使用。登录凭据复用“豆包网页登录”；参考图上传需要已登录 Chrome 豆包页和上传插件。当前参考图支持 1–2 张。</p><form data-provider="mock_doubao"><input name="id" type="hidden"><label>配置名称<input name="name" value="豆包 Mock" required></label><label>默认生图模型<select name="model"></select></label><label>默认视频模型<select name="default_video_model"></select></label><label><input name="enabled" type="checkbox" checked style="width:auto">启用</label><button>保存 Provider</button><div class="status"></div></form></section><section id="comfy" class="panel">''')
+FIXED_HTML=FIXED_HTML.replace('</body>', '<script src="/assets/doubao_provider.js"></script></body>')
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def proxy_mentions(self):
         try:
@@ -135,8 +158,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_body(502, 'application/json; charset=utf-8', json.dumps({'error':'抖音服务连接失败，请检查服务是否运行'}, ensure_ascii=False))
     def log_message(self, *_): return
     def send_body(self, status, content_type, body):
-        body=body.encode() if isinstance(body,str) else body; self.send_response(status); self.send_header('content-type',content_type); self.send_header('content-length',str(len(body))); self.end_headers(); self.wfile.write(body)
+        body=body.encode() if isinstance(body,str) else body; self.send_response(status); self.send_header('content-type',content_type); self.send_header('content-length',str(len(body))); self.send_header('Cache-Control','no-store'); self.end_headers(); self.wfile.write(body)
     def do_GET(self):
+        if self.path == '/assets/doubao_provider.js': self.send_body(200,'application/javascript; charset=utf-8',Path(__file__).with_name('doubao_provider.js').read_text(encoding='utf-8')); return
+        if self.path == '/assets/mock_doubao.js': self.send_body(200,'application/javascript; charset=utf-8',Path(__file__).with_name('mock_doubao.js').read_text(encoding='utf-8')); return
+        if self.path == '/api/mock-doubao/credentials':
+            try: self.send_body(200,'application/json; charset=utf-8',json.dumps(MockDoubaoConfigStore(self.server.store_dir/'mock_doubao.json').credentials(),ensure_ascii=False))
+            except ValueError as exc: self.send_body(400,'application/json; charset=utf-8',json.dumps({'error':str(exc)},ensure_ascii=False))
+            return
+        if self.path == '/api/mock-doubao':
+            try: self.send_body(200,'application/json; charset=utf-8',json.dumps(MockDoubaoConfigStore(self.server.store_dir/'mock_doubao.json').public(),ensure_ascii=False))
+            except ValueError as exc: self.send_body(400,'application/json; charset=utf-8',json.dumps({'error':str(exc)},ensure_ascii=False))
+            return
         if self.path == '/api/mentions': self.proxy_mentions(); return
         if self.path=='/api/storage': self.send_body(200,'application/json; charset=utf-8',json.dumps(StorageConfigStore(self.server.store_dir / 'storage.json').get(),ensure_ascii=False)); return
         if self.path=='/api/cloudinary': self.send_body(200,'application/json; charset=utf-8',json.dumps(CloudinaryConfigStore(self.server.store_dir / 'cloudinary.json').get(),ensure_ascii=False)); return
@@ -152,9 +185,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         values=required.get(field,[[]])[0]
                         if isinstance(values,list): models['comfy'].extend(str(x) for x in values)
             except Exception: pass
+            from services.video_creator.tools.ai.doubao_web import MODELS
+            models['mock_doubao_image']=list(MODELS)
+            from services.video_creator.tools.ai.doubao_web_video import MODELS as VIDEO_MODELS
+            models['mock_doubao_video']=list(VIDEO_MODELS)
             models['comfy']=list(dict.fromkeys(models['comfy'])); self.send_body(200,'application/json; charset=utf-8',json.dumps(models,ensure_ascii=False)); return
         self.send_body(404,'text/plain','Not found')
     def do_POST(self):
+        if self.path == '/api/mock-doubao':
+            try:
+                length=int(self.headers.get('content-length','0'))
+                if not 0 < length <= 1024*1024: raise ValueError('配置大小必须在 1 MB 以内')
+                try: values=json.loads(self.rfile.read(length))
+                except (ValueError, UnicodeError): raise ValueError('配置不是有效的 JSON') from None
+                config=MockDoubaoConfigStore(self.server.store_dir/'mock_doubao.json').save(values)
+                self.send_body(200,'application/json; charset=utf-8',json.dumps({'config':config},ensure_ascii=False))
+            except ValueError as exc: self.send_body(400,'application/json; charset=utf-8',json.dumps({'error':str(exc)},ensure_ascii=False))
+            except Exception: self.send_body(500,'application/json; charset=utf-8',json.dumps({'error':'保存豆包配置失败，请检查服务端存储'},ensure_ascii=False))
+            return
         if self.path in ('/api/mentions/start', '/api/mentions/stop'): self.proxy_mentions(); return
         if self.path=='/api/storage':
             try:
@@ -169,6 +217,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path!='/api/providers': self.send_body(404,'text/plain','Not found'); return
         try:
             values=json.loads(self.rfile.read(int(self.headers.get('content-length','0'))))
+            if values.get('provider') == 'mock_doubao':
+                from services.video_creator.tools.ai.doubao_web import MODELS
+                if values.get('model') not in MODELS:raise ValueError('请选择已验证映射的豆包生图模型')
+                from services.video_creator.tools.ai.doubao_web_video import MODELS as VIDEO_MODELS
+                if values.get('default_video_model') and values['default_video_model'] not in VIDEO_MODELS:raise ValueError('请选择已确认映射的豆包视频模型')
+                values={k:v for k,v in values.items() if k in {'id','provider','name','model','default_video_model','enabled'}}
             if values.get('provider') == 'douyin_understanding':
                 from services.douyin.video_understanding import validate_config
                 values = validate_config(values)
