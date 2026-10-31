@@ -19,7 +19,7 @@ class AgentTests(unittest.TestCase):
         for value in ({'intent': 'publish'}, {'intent': 'question', 'question': ''}):
             provider.complete.return_value = value
             with self.assertRaises(ValueError):
-                classify_intent(provider, 'test')
+                classify_intent(provider, '为什么去沙漠？')
 
     def test_real_stdio_discovery_and_invalid_calls(self):
         from mcp import ClientSession, StdioServerParameters

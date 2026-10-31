@@ -10,6 +10,14 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP, Context
 from services.douyin.reply_style import SUMMARY_REPLY_PROMPT, COMMENT_REPLY_STYLE_VERSION, comment_reply_error
+from services.douyin.understanding_prompts import SUMMARY_STYLE_VERSION
+
+
+def analysis_cache_fingerprint(config):
+    settings = {key: config.get(key) for key in
+                ('base_url', 'model', 'transcription_model', 'context_window', 'api_format')}
+    return f'verified-aweme-v1:{SUMMARY_STYLE_VERSION}:' + hashlib.sha256(
+        json.dumps(settings, sort_keys=True).encode()).hexdigest()
 
 
 def create_server(kind, root, config_path, profile):
@@ -27,12 +35,16 @@ def create_server(kind, root, config_path, profile):
             import asyncio
             loop = asyncio.get_running_loop()
             def progress(message, *_):
-                asyncio.run_coroutine_threadsafe(ctx.report_progress(0, message=message), loop).result()
+                pending = asyncio.run_coroutine_threadsafe(ctx.report_progress(0, message=message), loop)
+                try:
+                    pending.result(timeout=15)
+                except TimeoutError:
+                    pending.cancel()
+                    raise RuntimeError('任务监控连接无响应，已停止处理')
             def work():
                 from services.douyin.service import download_work_media
                 effective = config()
-                fingerprint = 'verified-aweme-v1:' + hashlib.sha256(json.dumps({k: effective.get(k) for k in
-                    ('base_url', 'model', 'transcription_model', 'context_window', 'api_format')}, sort_keys=True).encode()).hexdigest()
+                fingerprint = analysis_cache_fingerprint(effective)
                 download_root = root.parent.parent
                 for category in ('mentions', 'understanding'):
                     for summary in (download_root / category).glob('*/summary.json'):
@@ -43,8 +55,10 @@ def create_server(kind, root, config_path, profile):
                             if json.loads(marker.read_text(encoding='utf-8')) != {'url': url, 'config': fingerprint}:
                                 continue
                             result = json.loads(summary.read_text(encoding='utf-8'))
+                            if result.get('summary_style_version') != SUMMARY_STYLE_VERSION:
+                                continue
                             trace = json.loads((summary.parent / 'task.json').read_text(encoding='utf-8'))
-                            if trace.get('status') != 'done' or not (summary.parent / result['video_file']).exists():
+                            if trace.get('status') != 'done' or not all((summary.parent / name).is_file() for name in ([result['video_file']] if result.get('video_file') else result.get('image_files', []))):
                                 continue
                             if summary.parent == root:
                                 progress('已复用本任务完成的视频分析，仅重新生成回复')
@@ -74,7 +88,7 @@ def create_server(kind, root, config_path, profile):
                                 return paths
                     with contextlib.redirect_stdout(sys.stderr):
                         return download_work_media(url, output_dir=output_dir, headless=True,
-                            user_data_dir=profile, all_media=False, wait_seconds=1.5, progress_callback=callback)
+                            user_data_dir=profile, all_media=False, wait_seconds=1.5, progress_callback=callback, understanding_media=True)
                 result = understand_work(url, root, download, effective, progress)
                 (root / 'analysis_cache_key.json').write_text(json.dumps({'url': url, 'config': fingerprint}), encoding='utf-8')
                 return result

@@ -32,7 +32,8 @@ def write_report(root, result, trace):
              f"来源：{result['source_url']}", "", f"分类：{result['format']} / {result['topic']}", "",
              f"视频时长：{result['duration_seconds']} 秒；采样画面：{result['frame_count']} 张；模型：{result['model']}", "",
              f"语音模型：{result.get('transcription_model', '未记录')}；依据：{result.get('summary_basis', '未记录')}", "",
-             f"[缓存视频]({trace['artifacts']['video']})", ""]
+             *([f"[缓存视频]({trace['artifacts']['video']})", ""] if trace['artifacts'].get('video') else ["图文作品：以下为全部原图，图片顺序不代表配音时间。", ""]),
+             *([f"[配音]({trace['artifacts']['audio']})", ""] if trace['artifacts'].get('audio') else [])]
     for title, body in report_sections(root, result, trace):
         lines += ["## " + title, "", body if "中间结果" not in title else "```json\n" + body + "\n```", ""]
     lines += ["## 采样画面", ""]
@@ -98,7 +99,8 @@ class UnderstandingHistory:
         video = str(result.get("video_file") or result.get("video", {}).get("href", "").removeprefix("/downloads/"))
         if result.get("video_file"):
             video = relative + "/" + video
-        (self.download_root / video).resolve().relative_to(self.download_root)
+        if video:
+            (self.download_root / video).resolve().relative_to(self.download_root)
         identifier = root.name
         trace = json.loads((root / "task.json").read_text(encoding="utf-8"))
         markdown = write_report(root, result, trace)
@@ -107,6 +109,11 @@ class UnderstandingHistory:
                        report={"href": "/downloads/" + quote(relative + "/report.md", safe="/")},
                        summary_report={"href": "/downloads/" + quote(relative + "/summary.json", safe="/")})
         payload.pop("video_file", None)
+        if not video:
+            payload.pop('video', None)
+        payload['images'] = [{'href': '/downloads/' + quote(relative + '/' + name, safe='/')} for name in result.get('image_files', [])]
+        if result.get('audio_file'):
+            payload['audio'] = {'href': '/downloads/' + quote(relative + '/' + result['audio_file'], safe='/')}
         with self.connect() as db:
             if db.execute('SELECT 1 FROM deleted_understanding_history WHERE id=?', (identifier,)).fetchone():
                 return payload

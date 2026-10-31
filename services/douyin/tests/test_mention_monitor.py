@@ -3,6 +3,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import MagicMock
 from pathlib import Path
 
 from services.douyin.mention_monitor import MentionMonitor
@@ -24,6 +25,88 @@ class MentionTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_model_failure_pauses_queue_and_health_recovery_produces_only_draft(self):
+        self.snapshot([])
+        self.snapshot(['101', '102'])
+        rows = {r['comment_id']: r for r in self.monitor.status()['items']}
+        row = rows['101']
+        self.monitor.agent = MagicMock()
+        self.monitor.agent.run.side_effect = RuntimeError('视频理解模型 HTTP 500: CUDA error: unknown error')
+        self.monitor.process(row)
+        state = self.monitor.status()
+        self.assertEqual(row['status'], 'pending')
+        self.assertEqual(row['inference_attempts'], 1)
+        self.assertFalse(row['auto_reply'])
+        self.assertEqual(state['inference_health']['kind'], 'gpu')
+        self.monitor.dispatch_next()
+        self.assertIsNone(self.monitor.worker)
+        self.assertEqual(self.monitor.agent.run.call_count, 1)
+        restarted = QuietMonitor(Path(self.temp.name), None, None)
+        self.assertEqual(restarted.inference_health['kind'], 'gpu')
+        self.monitor.agent.run.side_effect = None
+        self.monitor.agent.run.return_value = ({'summary': '恢复成功'}, '草稿')
+        self.monitor.process(row)
+        self.monitor.agent.check_health.assert_called_once()
+        self.assertEqual(row['status'], 'draft')
+        self.assertEqual(self.monitor.inference_health, {})
+        self.assertIsNone(self.monitor.command)
+        self.assertEqual(next(r for r in self.monitor.status()['items'] if r['comment_id']=='102')['status'], 'pending')
+
+    def test_failed_health_probe_does_not_consume_analysis_retry_or_next_task(self):
+        self.snapshot([])
+        self.snapshot(['101'])
+        row = self.monitor.status()['items'][0]
+        self.monitor.agent = MagicMock()
+        self.monitor.agent.run.side_effect = RuntimeError('视频理解模型 HTTP 500: std::bad_alloc')
+        self.monitor.process(row)
+        self.monitor.agent.check_health.side_effect = RuntimeError('GPU still unavailable')
+        self.monitor.process(row)
+        self.assertEqual(row['status'], 'pending')
+        self.assertEqual(row['inference_attempts'], 1)
+        self.assertEqual(self.monitor.agent.run.call_count, 1)
+        self.assertEqual(self.monitor.inference_health['failures'], 2)
+
+    def test_repeated_model_failures_have_bounded_analysis_attempts(self):
+        self.snapshot([])
+        self.snapshot(['101'])
+        row = self.monitor.status()['items'][0]
+        self.monitor.agent = MagicMock()
+        self.monitor.agent.run.side_effect = RuntimeError('视频理解模型 HTTP 500: failed to allocate buffer')
+        for _ in range(3):
+            self.monitor.process(row)
+        self.assertEqual(row['status'], 'error')
+        self.assertEqual(row['inference_attempts'], 3)
+        self.assertTrue(self.monitor.inference_health)
+        self.assertIsNone(self.monitor.command)
+
+    def test_retry_failed_only_queues_draft_and_preserves_error(self):
+        self.snapshot(['100'])
+        row = self.monitor.status()['items'][0]
+        row.update(status='error', error='Timeout 90000ms exceeded', auto_reply=True,
+                   preparation_status='done')
+        self.monitor.save(row)
+        retried = self.monitor.retry_failed(row['id'])
+        self.assertEqual(retried['status'], 'pending')
+        self.assertFalse(retried['auto_reply'])
+        self.assertEqual(retried['retry_count'], 1)
+        self.assertEqual(retried['retry_history'][0]['error'], 'Timeout 90000ms exceeded')
+        self.assertEqual(retried['retry_history'][0]['task_directory'], row['task_directory'])
+        self.assertNotEqual(retried['task_directory'], row['task_directory'])
+        self.assertEqual(retried['preparation_status'], 'pending')
+        with self.assertRaises(ValueError):
+            self.monitor.retry_failed(row['id'])
+
+    def test_retry_rejects_other_account_and_stopped_monitor(self):
+        self.snapshot(['100'])
+        row = self.monitor.status()['items'][0]
+        row.update(status='error', account_id='another-account')
+        self.monitor.save(row)
+        with self.assertRaises(ValueError):
+            self.monitor.retry_failed(row['id'])
+        self.monitor.enabled = False
+        with self.assertRaises(ValueError):
+            self.monitor.retry_failed(row['id'])
 
     def snapshot(self, comments, **extra):
         self.monitor.command = {'id': 'collect', 'action': 'collectMentions'}

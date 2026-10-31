@@ -39,6 +39,11 @@ class MentionMonitor:
         self.startup_check = None
         self.startup_retry_at = 0
         self.token = secrets.token_urlsafe(32)
+        self.health_path = self.root / 'inference_health.json'
+        try:
+            self.inference_health = json.loads(self.health_path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            self.inference_health = {}
         with self.db() as db:
             db.execute("CREATE TABLE IF NOT EXISTS mentions (id TEXT PRIMARY KEY, data TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS mention_checkpoints (account_id TEXT PRIMARY KEY, observed_at REAL NOT NULL)")
@@ -75,7 +80,40 @@ class MentionMonitor:
             return dict(enabled=self.enabled, auto_reply=self.auto_reply, interval=self.interval,
                         queue=dict(pending=len(queued), active=active, concurrency=1),
                         autostart_pending=self.startup_check is not None and not self.enabled,
-                        last_seen=self.last_seen, error=self.error, request_state=self.request_state, items=rows)
+                        last_seen=self.last_seen, error=self.error, request_state=self.request_state,
+                        inference_health=self.inference_health, items=rows)
+
+    def save_inference_health(self, value):
+        self.inference_health = value
+        temporary = self.health_path.with_suffix('.tmp')
+        temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding='utf-8')
+        temporary.replace(self.health_path)
+
+    def defer_inference_failure(self, row, exc, *, probe=False):
+        from services.douyin.inference_health import inference_failure_kind, memory_snapshot
+        kind = inference_failure_kind(exc)
+        if not kind and not probe:
+            return False
+        prior = self.inference_health
+        failures = int(prior.get('failures', 0)) + 1
+        delay = (30, 120, 300)[min(failures - 1, 2)]
+        entry = dict(time=time.time(), kind=kind or prior.get('kind', 'probe'),
+                     error=str(exc)[:2000], probe=probe, memory=memory_snapshot())
+        row.setdefault('inference_recovery', []).append(entry)
+        row['inference_recovery'] = row['inference_recovery'][-20:]
+        attempts = int(row.get('inference_attempts', 0)) + (0 if probe else 1)
+        row.update(inference_attempts=attempts, auto_reply=False)
+        self.save_inference_health(dict(kind=entry['kind'], failures=failures,
+            next_probe=time.time() + delay, error=entry['error'], task_directory=row['task_directory']))
+        if attempts > 2:
+            row.update(status='error', error=str(exc), progress='模型恢复后仍多次失败，已停止本任务自动重试')
+        else:
+            row.update(status='pending', error='', progress=f'等待模型恢复；{delay}秒后验证，恢复后仅保存草稿')
+        self.save(row)
+        root = self.root / row['task_directory']
+        root.mkdir(parents=True, exist_ok=True)
+        (root / 'inference_recovery.json').write_text(json.dumps(row['inference_recovery'], ensure_ascii=False, indent=2), encoding='utf-8')
+        return True
 
     def configure_autostart(self, validate):
         with self.lock:
@@ -136,6 +174,28 @@ class MentionMonitor:
             if row['status'] != 'baseline' or row['account_id'] != self.account_id:
                 raise ValueError('只允许处理当前账号中尚未发送过的基线通知')
             row.update(status='pending', session=self.session, auto_reply=self.auto_reply, error='', queued_at=time.time())
+            self.save(row)
+            return row
+
+    def retry_failed(self, key):
+        """Retry analysis as a draft only; never resend an earlier ambiguous comment."""
+        with self.lock, self.db() as db:
+            if not self.enabled:
+                raise ValueError('请先启动监听')
+            found = db.execute('SELECT data FROM mentions WHERE id=?', (str(key),)).fetchone()
+            if not found:
+                raise ValueError('通知不存在')
+            row = json.loads(found[0])
+            if row['status'] != 'error' or row['account_id'] != self.account_id:
+                raise ValueError('只允许重试当前账号的失败任务')
+            row.setdefault('retry_history', []).append(dict(
+                error=row.get('error', ''), progress=row.get('progress', ''),
+                task_directory=row.get('task_directory', ''), time=time.time()))
+            row.update(status='pending', session=self.session, auto_reply=False, error='',
+                       task_directory=uuid.uuid4().hex,
+                       preparation_status='pending', preparation_error='',
+                       progress='已排队重试分析；完成后仅保存草稿，不发送评论', queued_at=time.time(),
+                       inference_attempts=0, retry_count=int(row.get('retry_count', 0)) + 1)
             self.save(row)
             return row
 
@@ -287,6 +347,12 @@ class MentionMonitor:
                 row = next((r for r in self._pending_rows(db) if r['account_id'] == self.account_id), None)
             if row is None:
                 return
+            if self.inference_health.get('next_probe', 0) > time.time():
+                message = '等待模型服务恢复，队列已暂停；恢复验证通过后自动继续'
+                if row.get('progress') != message:
+                    row['progress'] = message
+                    self.save(row)
+                return
             if row['id'] == self.preparing_id:
                 return
             # Resume only never-started work after the logged-in account is verified.
@@ -296,6 +362,8 @@ class MentionMonitor:
             self.worker.start()
 
     def prepare_next(self):
+        if self.inference_health:
+            return
         if not self.agent or not hasattr(self.agent, 'prepare'):
             return
         if self.preparer is not None and self.preparer.is_alive():
@@ -365,6 +433,13 @@ class MentionMonitor:
                 from services.douyin.video_understanding import _analysis_lock
                 # The MCP subprocess has its own lock; arbitrate manual analysis here.
                 with _analysis_lock:
+                    if self.inference_health:
+                        try:
+                            self.agent.check_health(progress)
+                        except Exception as exc:
+                            self.defer_inference_failure(row, exc, probe=True)
+                            return
+                        self.save_inference_health({})
                     row['analysis'], row['reply'] = self.agent.run(row, root, progress)
             else:
                 row['analysis'] = self.analyze(row['source_url'], root, progress)
@@ -402,6 +477,8 @@ class MentionMonitor:
                     raise RuntimeError('回复超时，结果未知；请人工核对，不会自动重发')
             self.save(row)
         except Exception as exc:
+            if row.get('status') != 'sending' and self.agent and self.defer_inference_failure(row, exc):
+                return
             row.update(status='error', error=str(exc))
             self.save(row)
         finally:

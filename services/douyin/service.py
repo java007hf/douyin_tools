@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 import uuid
+import requests
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -473,9 +474,33 @@ WEB_HTML = r"""<!doctype html>
           if (row.queue_position) link.textContent += ` · 排队第 ${row.queue_position} 位`;
           const detail = document.createElement('p');
           detail.style.whiteSpace = 'pre-wrap';
-          detail.textContent = [row.text, row.progress, row.reply && '回复：' + row.reply, row.error].filter(Boolean).join('\n');
+          detail.textContent = [row.text, row.progress, row.reply && '回复：' + row.reply,
+            row.error && (/Timeout|timed out/i.test(row.error) ? '处理超时，可重试分析。' : '处理失败，可查看错误详情。')].filter(Boolean).join('\n');
           if (row.agent_plan) detail.textContent += '\n处理意图：' + (row.agent_plan.intent === 'question' ? '视频问答' : '视频摘要');
           card.append(link, detail);
+          if (row.error) {
+            const errors = document.createElement('details');
+            const summary = document.createElement('summary'); summary.textContent = '错误详情';
+            const log = document.createElement('pre'); log.textContent = row.error;
+            log.style.whiteSpace = 'pre-wrap'; log.style.overflowWrap = 'anywhere';
+            errors.append(summary, log); card.append(errors);
+          }
+          if (row.status === 'error') {
+            const retry = document.createElement('button'); retry.textContent = '重试分析';
+            retry.title = '重新分析并保存回复草稿，不发送评论';
+            retry.onclick = async () => {
+              retry.disabled = true; retry.textContent = '正在排队…';
+              try {
+                const response = await fetch(mediaHref('/api/mentions/retry'), {
+                  method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id:row.id})
+                });
+                const result = await response.json();
+                if (!response.ok) throw new Error(result.error || '重试失败');
+                await refreshMentions();
+              } catch (error) { retry.disabled = false; retry.textContent = '重试分析'; detail.textContent += '\n' + error.message; }
+            };
+            card.append(retry);
+          }
           if (row.analysis && row.task_directory) {
             const report = document.createElement('a');
             report.href = mediaHref('/downloads/mentions/' + row.task_directory + '/report.md');
@@ -521,18 +546,21 @@ WEB_HTML = r"""<!doctype html>
       }
       const tags = add("div", "");
       [result.format, result.topic, ...(result.tags || [])].filter(Boolean).forEach(text => add("span", text, tags, "tag"));
-      add("p", `视频 ${timeLabel(result.duration_seconds)} · ${result.frame_count} 张采样画面 · ${result.model}`, panel, "hint");
+      add("p", `${result.source_type === "image_note" ? "图文配音" : "视频"} ${timeLabel(result.duration_seconds)} · ${result.frame_count} 张${result.source_type === "image_note" ? "原图" : "采样画面"} · ${result.model}`, panel, "hint");
       add("h3", "内容摘要");
       add("div", result.summary, panel, "summary-text");
       add("h3", "核心要点");
       const points = add("ul", "");
       (result.key_points || []).forEach(text => add("li", text, points));
-      const video = document.createElement("video");
+      const note = result.source_type === 'image_note';
+      (result.images || []).forEach(item => {const img = document.createElement('img'); img.src = mediaHref(item.href); img.alt = '原图'; img.style.maxWidth = '100%'; panel.appendChild(img);});
+      const media = result.video || result.audio;
+      const video = document.createElement(note ? "audio" : "video");
       video.controls = true;
       video.preload = "metadata";
-      video.src = mediaHref(result.video.href);
-      add("h3", "时间线与原视频");
-      panel.appendChild(video);
+      if (media) video.src = mediaHref(media.href);
+      add("h3", note ? "图文配音与时间线" : "时间线与原视频");
+      if (media) panel.appendChild(video);
       const playbackStatus = add("p", "", panel, "hint");
       video.addEventListener("error", () => {
         playbackStatus.textContent = "视频加载失败，请刷新后重试，或下载缓存视频播放。";
@@ -580,9 +608,8 @@ WEB_HTML = r"""<!doctype html>
       if (/^https?:\/\//i.test(result.source_url)) sourceLink.href = result.source_url;
       sourceLink.target = "_blank";
       sourceLink.rel = "noopener noreferrer";
-      const videoLink = add("a", "下载缓存视频", add("p", ""));
-      videoLink.href = mediaHref(result.video.href);
-      videoLink.download = "";
+      if (media) {const videoLink = add("a", note ? "下载配音" : "下载缓存视频", add("p", ""));
+      videoLink.href = mediaHref(media.href); videoLink.download = "";}
       const link = add("a", result.history_id ? "下载完整报告 report.md" : "下载摘要 JSON", add("p", ""));
       link.href = mediaHref(result.report.href);
       link.download = result.history_id ? "report.md" : "summary.json";
@@ -1239,7 +1266,6 @@ def run_web_server(host: str, port: int, cache_dir: Path, store_dir: Path | None
     jobs = WebJobStore(persistent_dir / "web_jobs")
     from services.douyin.understanding_history import UnderstandingHistory, render_report
     history = UnderstandingHistory(persistent_dir / "understanding_history.sqlite3", download_root)
-    history.backfill()
     history.interrupt_manual_tasks()
     from services.douyin.mention_monitor import MentionMonitor
 
@@ -1252,6 +1278,8 @@ def run_web_server(host: str, port: int, cache_dir: Path, store_dir: Path | None
     from services.douyin.mention_agent import MentionAgent
     agent = MentionAgent(mention_config, service_store('video_creator') / 'provider_configs.json', download_user_data_dir)
     mention_monitor = MentionMonitor(download_root / 'mentions', None, None, history.save_mention, agent=agent)
+    # Reconcile interrupted mention rows before reflecting them in history.
+    history.backfill()
     if os.environ.get('DOUYIN_MENTION_AUTOSTART', '1').lower() in {'1', 'true', 'yes'}:
         mention_monitor.configure_autostart(mention_config)
     for trace_path in (download_root / "understanding").glob("*/task.json"):
@@ -1413,6 +1441,9 @@ def run_web_server(host: str, port: int, cache_dir: Path, store_dir: Path | None
                 if self.path == '/api/mentions/process-existing':
                     web_json_response(self, 202, mention_monitor.queue_existing(data.get('id')))
                     return
+                if self.path == '/api/mentions/retry':
+                    web_json_response(self, 202, mention_monitor.retry_failed(data.get('id')))
+                    return
 
                 if self.path == "/api/collect":
                     homepage_url = str(data.get("url") or "").strip()
@@ -1477,7 +1508,7 @@ def run_web_server(host: str, port: int, cache_dir: Path, store_dir: Path | None
                         def download(url, output_dir, callback):
                             return download_work_media(url, output_dir=output_dir, headless=not headful,
                                 user_data_dir=download_user_data_dir, all_media=False,
-                                wait_seconds=1.5, progress_callback=callback)
+                                wait_seconds=1.5, progress_callback=callback, understanding_media=True)
                         try:
                             result = understand_work(work_url, task_root, download, config, tracked_progress)
                             tracked_progress("正在保存完整报告和历史记录")
@@ -1872,14 +1903,16 @@ def extract_media_from_aweme(item: dict[str, Any]) -> list[MediaItem]:
                         or bit_rate.get("format")
                         or "bit_rate"
                     )
+                    if bit_rate.get('format'):
+                        label += ' ' + str(bit_rate['format'])
                     add_media(
                         media,
                         seen,
                         "video",
                         first_url(bit_rate.get("play_addr")),
                         label=label,
-                        width=int_value(bit_rate.get("width") or video.get("width")),
-                        height=int_value(bit_rate.get("height") or video.get("height")),
+                        width=int_value(bit_rate.get("width") or (bit_rate.get("play_addr") or {}).get("width") or video.get("width")),
+                        height=int_value(bit_rate.get("height") or (bit_rate.get("play_addr") or {}).get("height") or video.get("height")),
                         bitrate=int_value(
                             bit_rate.get("bit_rate")
                             or bit_rate.get("bitRate")
@@ -1893,8 +1926,8 @@ def extract_media_from_aweme(item: dict[str, Any]) -> list[MediaItem]:
                         "video",
                         first_url(bit_rate.get("playAddr")),
                         label=label,
-                        width=int_value(bit_rate.get("width") or video.get("width")),
-                        height=int_value(bit_rate.get("height") or video.get("height")),
+                        width=int_value(bit_rate.get("width") or (bit_rate.get("playAddr") or {}).get("width") or video.get("width")),
+                        height=int_value(bit_rate.get("height") or (bit_rate.get("playAddr") or {}).get("height") or video.get("height")),
                         bitrate=int_value(
                             bit_rate.get("bit_rate")
                             or bit_rate.get("bitRate")
@@ -2087,22 +2120,57 @@ def safe_name(value: str) -> str:
     return re.sub(r"[^0-9A-Za-z._-]+", "_", value).strip("_") or "douyin_work"
 
 
-def download_url(context, url: str, destination: Path, referer: str) -> None:
-    response = context.request.get(
-        url,
-        headers={
+class _MediaCookieSnapshot:
+    def __init__(self, values):
+        self.values = values
+
+    def cookies(self, urls):
+        return [cookie for url in urls for cookie in self.values.get(url, [])]
+
+
+def download_url(context, url: str, destination: Path, referer: str, *, progress=None, total_timeout=1200) -> None:
+    """Stream media outside the browser driver so large bodies do not fill its heap."""
+    started = time.monotonic()
+    headers = {
             "referer": referer,
             "user-agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/124.0.0.0 Safari/537.36"
             ),
-        },
-        timeout=90_000,
-    )
-    if not response.ok:
-        raise RuntimeError(f"Download failed: HTTP {response.status} {url}")
-    destination.write_bytes(response.body())
+        }
+    try:
+        with requests.Session() as session:
+            try:
+                cookies = context.cookies([url])
+            except Exception:
+                cookies = []  # Signed CDN URLs can remain usable after the page exits.
+            for cookie in cookies:
+                session.cookies.set(cookie['name'], cookie['value'], domain=cookie.get('domain', ''), path=cookie.get('path', '/'))
+            with session.get(url, headers=headers, stream=True,
+                             timeout=(min(30, total_timeout), min(120, total_timeout))) as response:
+                if not response.ok:
+                    raise RuntimeError(f'Download failed: HTTP {response.status_code}')
+                size = int(response.headers.get('content-length', '0') or 0)
+                received, last_progress = 0, started
+                with destination.open('wb') as output:
+                    for block in response.iter_content(chunk_size=256 * 1024):
+                        now = time.monotonic()
+                        if now - started >= total_timeout:
+                            raise TimeoutError('单个媒体下载超过剩余下载时限')
+                        if not block:
+                            continue
+                        output.write(block)
+                        received += len(block)
+                        if progress and now - last_progress >= 5:
+                            total = f' / {size / 1048576:.1f} MB' if size else ' MB'
+                            progress(f'下载中：{received / 1048576:.1f}{total}')
+                            last_progress = now
+                if not received or (size and not response.headers.get('content-encoding') and received != size):
+                    raise RuntimeError('媒体下载不完整')
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
 
 
 def media_content_length(context, item: MediaItem, referer: str) -> int:
@@ -2204,6 +2272,20 @@ def choose_default_media(
     return images or media
 
 
+def understanding_media_rank(item: MediaItem):
+    """Prefer a modest video rendition while retaining all fallback sources."""
+    short_side = min(item.width, item.height)
+    audio_only = any(word in item.label.lower() for word in ('audio', 'music', 'soun')) or urlsplit(item.url).path.lower().endswith(('.mp3', '.m4a', '.aac', '.wav'))
+    if 360 <= short_side <= 720:
+        tier = 0
+    elif short_side > 720:
+        tier = 1
+    else:
+        tier = 2  # Unknown dimensions or very small renditions are fallbacks.
+    dash = 'dash' in (item.url + ' ' + item.label).lower()
+    return (audio_only, dash, tier, abs(short_side - 480), item.bitrate)
+
+
 _download_lock = threading.Lock()
 
 
@@ -2222,6 +2304,7 @@ def _download_work_media(
     all_media: bool = False,
     wait_seconds: float = 6.0,
     progress_callback: ProgressCallback | None = None,
+    understanding_media: bool = False,
 ) -> list[Path]:
     emit_progress(progress_callback, "正在解析作品链接")
     work_url = resolve_douyin_work_url(work_url)
@@ -2233,6 +2316,7 @@ def _download_work_media(
     with sync_playwright() as playwright:
         context = playwright.chromium.launch_persistent_context(
             str(user_data_dir),
+            timeout=60_000,
             headless=headless,
             viewport={"width": 1280, "height": 900},
             user_agent=(
@@ -2243,6 +2327,7 @@ def _download_work_media(
         )
         page = context.new_page()
         media: list[MediaItem] = []
+        media_diagnostics = []
 
         def handle_response(response: Response) -> None:
             nonlocal media
@@ -2251,7 +2336,26 @@ def _download_work_media(
             payload = response_json(response)
             if payload is None:
                 return
+            if '/aweme/detail/' in urlsplit(response.url).path and isinstance(payload, dict):
+                for work in iter_dicts(payload):
+                    if aweme_id_matches(work, work_id) and ('video' in work or 'images' in work):
+                        (output_dir / 'target_media_metadata.json').write_text(json.dumps({
+                            'aweme_id': str(work.get('aweme_id')), 'aweme_type': work.get('aweme_type'),
+                            'keys': list(work), 'video': work.get('video'), 'images': work.get('images')
+                        }, ensure_ascii=False), encoding='utf-8')
+                        break
+                media_diagnostics.append({'path': urlsplit(response.url).path, 'http_status': response.status,
+                                          'status_code': payload.get('status_code'),
+                                          'status_msg': str(payload.get('status_msg') or '')[:300],
+                                          'work_ids': list({str(item.get('aweme_id')) for item in iter_dicts(payload) if item.get('aweme_id')})[:20]})
             media = extract_media_from_payload(payload, work_id)
+
+        def wait_for_target_media():
+            # Pump browser response events until the requested work is identified.
+            for _ in range(30):
+                if media:
+                    return
+                page.wait_for_timeout(500)
 
         page.on("response", handle_response)
         page.goto(work_url, wait_until="domcontentloaded", timeout=45_000)
@@ -2262,19 +2366,25 @@ def _download_work_media(
             page.mouse.click(640, 450)
             page.keyboard.press("Space")
             emit_progress(progress_callback, "正在触发页面播放以捕获媒体接口")
-            page.wait_for_timeout(2500)
+            emit_progress(progress_callback, "正在等待目标作品详情接口，最多15秒")
+            wait_for_target_media()
 
         fallback_url = standard_open_url(work_url)
-        if not media and fallback_url not in page.url:
+        if not media:
             message = f"retry_with_standard_url: {fallback_url}"
             emit_progress(progress_callback, "正在改用标准作品地址重试")
             print(message, file=sys.stderr, flush=True)
             page.goto(fallback_url, wait_until="domcontentloaded", timeout=45_000)
             page.wait_for_timeout(int(wait_seconds * 1000))
             close_popups(page)
+            wait_for_target_media()
 
         if not media:
             emit_progress(progress_callback, "未找到目标作品 ID 对应的媒体，已拒绝推荐视频和未验证页面媒体")
+            (output_dir / 'media_lookup_error.json').write_text(json.dumps({
+                'work_id': work_id, 'page_path': urlsplit(page.url).path,
+                'page_title': page.title(), 'detail_responses': media_diagnostics,
+                'reloaded': True}, ensure_ascii=False, indent=2), encoding='utf-8')
 
         if not media:
             context.close()
@@ -2282,22 +2392,46 @@ def _download_work_media(
                 "No downloadable media URL was found. Try --headful and finish login/captcha first."
             )
 
+        if understanding_media and any(item.kind == "image" for item in media):
+            all_media = True
         if not all_media:
-            media = choose_default_media(context, media, work_url, prefer_images=prefer_images)
+            if understanding_media and not prefer_images and any(item.kind == 'video' for item in media):
+                media = sorted((item for item in media if item.kind == 'video'), key=understanding_media_rank)
+            else:
+                media = choose_default_media(context, media, work_url, prefer_images=prefer_images)
             if prefer_images and not any(item.kind == "image" for item in media):
                 context.close()
                 raise RuntimeError(
                     "No downloadable image URL was found for this note. Try --headful and finish login/captcha first."
                 )
+        download_context = context
+        if understanding_media:
+            cookies = {}
+            for item in media:
+                try:
+                    cookies[item.url] = context.cookies([item.url])
+                except Exception:
+                    cookies[item.url] = []
+            download_context = _MediaCookieSnapshot(cookies)
+            try:
+                context.close()
+            except Exception:
+                pass
+            emit_progress(progress_callback, '已获取媒体地址并关闭采集页面，开始流式下载')
         emit_progress(progress_callback, f"已找到 {len(media)} 个候选媒体，开始下载")
 
         downloaded: list[Path] = []
+        silent_fallback = None
         base_name = safe_name(work_id)
+        download_deadline = time.monotonic() + 1200 if understanding_media else None
         for index, item in enumerate(media, start=1):
+            remaining = download_deadline - time.monotonic() if download_deadline is not None else 1200
+            if remaining <= 0:
+                raise TimeoutError('下载阶段累计超过20分钟，已停止候选源重试')
             path = output_dir / f"{base_name}_{item.kind}_{index:02d}.{item.extension}"
             emit_progress(progress_callback, f"正在下载候选 {index}/{len(media)}")
             if all_media or item.kind != "video":
-                download_url(context, item.url, path, work_url)
+                download_url(download_context, item.url, path, work_url, progress=progress_callback, total_timeout=remaining)
                 downloaded.append(path)
                 message = f"downloaded {item.kind}: {path}"
                 emit_progress(progress_callback, message)
@@ -2305,8 +2439,22 @@ def _download_work_media(
                 continue
 
             temp_path = output_dir / f"{base_name}_{item.kind}_{index:02d}.partial.{item.extension}"
-            download_url(context, item.url, temp_path, work_url)
+            try:
+                download_url(download_context, item.url, temp_path, work_url, progress=progress_callback, total_timeout=remaining)
+            except Exception as exc:
+                temp_path.unlink(missing_ok=True)
+                failure = str(exc).split('\n', 1)[0].split('https://', 1)[0][:200]
+                emit_progress(progress_callback, f"候选 {index}/{len(media)} 下载失败（{type(exc).__name__}: {failure}），正在尝试下一个视频源")
+                continue
             if downloaded_file_has_video(temp_path):
+                if understanding_media and 'soun' not in mp4_handler_types(temp_path.read_bytes()):
+                    if silent_fallback is None:
+                        silent_fallback = output_dir / f'{base_name}_silent_fallback.mp4'
+                        os.replace(temp_path, silent_fallback)
+                    else:
+                        temp_path.unlink(missing_ok=True)
+                    emit_progress(progress_callback, '当前视频源没有音轨，继续查找包含原声的视频源')
+                    continue
                 os.replace(temp_path, path)
                 downloaded.append(path)
                 message = f"downloaded {item.kind}: {path}"
@@ -2319,11 +2467,20 @@ def _download_work_media(
             emit_progress(progress_callback, "当前候选只有音频，正在尝试下一个视频源")
             print(message, file=sys.stderr, flush=True)
 
+        if not downloaded and silent_fallback is not None:
+            downloaded.append(silent_fallback)
+        elif silent_fallback is not None:
+            silent_fallback.unlink(missing_ok=True)
         if not downloaded:
             context.close()
             raise RuntimeError("No downloaded candidate contained a video track.")
 
-        context.close()
+        try:
+            context.close()
+        except Exception:
+            # Completed files no longer depend on the browser connection.
+            if not downloaded:
+                raise
 
     identity = {'work_id': work_id, 'source_url': work_url, 'validation': 'matched_aweme_id',
                 'files': {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in downloaded}}
