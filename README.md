@@ -221,40 +221,68 @@ Invoke-RestMethod http://127.0.0.1:8003/tabs/douyin/api/mentions |
 
 抖音手动理解、@通知理解和 YouTube 理解复用同一个确定性处理链路，核心入口为 [video_understanding.py](services/douyin/video_understanding.py) 的 `understand_work`。@入口先做意图路由，再通过 MCP 调用理解工具；模型负责识别与归纳，代码控制节点顺序、状态、文件和恢复。
 
+图按 LangGraph 风格展示：实线是执行边，菱形是条件路由，虚线表示状态读写；`START` / `END` 标记执行边界。当前实现仍是 Python 确定性 Workflow，未引入 LangChain/LangGraph 运行库。`summarize` 内部步骤拆开显示以便阅读，实际 `task.json` 中仍记录为一个 `summarize` 节点；任一处理节点异常均进入错误处理，图中省略重复错误边。
+
+入口层位于图外：抖音手动提交、YouTube 持久队列以及 @通知 Agent/MCP 调用均进入该链路；@缓存命中可直接复用结果，理解完成后再执行摘要/问答与草稿/回复。
+
 ```mermaid
 flowchart TD
-    A["抖音手动提交"] --> Q
-    B["YouTube 提交 / 本地持久 FIFO"] --> Q
-    C["抖音 @通知 / 去重与持久 FIFO"] --> I["意图路由：摘要或视频问答"]
-    I --> M["MCP understand_video"]
-    M --> Q
-    Q["跨进程共享 FIFO 准入：整体并发 1"] --> V["校验独立的视频理解配置"]
-    V --> D["download：解析链接并下载 / 复用已准备媒体"]
-    D --> K["校验断点：来源、配置、媒体 SHA-256"]
-    K --> T{媒体类型}
-    T -->|视频| F["extract_frames：检查时长 / 均匀抽帧，最多 20 张"]
-    T -->|图文| P["prepare_images：按原顺序准备全部图片"]
-    F --> H{有音轨或配音？}
-    P --> H
-    H -->|有| W["transcribe：复用完整转写或离线 Whisper 转写"]
-    H -->|无| N["空转写并记录限制"]
-    W --> O["visual_understanding：每批最多 4 张，调用视觉 LLM"]
-    N --> O
-    O --> S["summarize：转写分段归纳，逐段保存断点"]
-    S --> E{合并证据超过 8000 字符？}
-    E -->|是| R["分批压缩全部证据，保留时间点与不确定性"]
-    R --> E
-    E -->|否| G["最终成稿：标题、分类、正文、观点、时间线、评论正文"]
-    G --> J{结构和时间范围校验通过？}
-    J -->|首次未通过| U["自动修正一次"]
-    U --> J
-    J -->|通过| Z["保存 summary.json、report.md / 更新历史与任务 done"]
-    J -->|修正后仍失败| X["任务 error：保存节点错误与已有产物"]
-    W -. 本地模型缺失或转写异常 .-> X
-    R -. 压缩不收敛 .-> X
-    Z --> OUT["手动 / YouTube：展示结果与历史"]
-    Z --> AT["@入口：复用评论正文或调用摘要 / 问答 MCP"]
-    AT --> REPLY["按任务模式保存草稿或确定性发送原评论回复"]
+    START(["START"]) --> admission
+    admission["admission<br/>共享 FIFO 准入"] --> validate_config
+    validate_config["validate_config<br/>校验理解模型配置"] --> download
+    download["download<br/>解析链接 / 准备本地媒体"] --> checkpoint
+    checkpoint["load_checkpoint<br/>校验输入与可复用状态"] --> media_router
+    media_router{"route_media<br/>媒体类型"}
+    media_router -->|video| extract_frames
+    media_router -->|image_note| prepare_images
+    extract_frames["extract_frames<br/>检查时长 / 最多 20 帧"] --> audio_router
+    prepare_images["prepare_images<br/>准备全部原图"] --> audio_router
+    audio_router{"route_audio<br/>是否有音轨"}
+    audio_router -->|yes| transcribe
+    audio_router -->|no| skip_audio
+    transcribe["transcribe<br/>复用转写 / 本地 Whisper"] --> visual_understanding
+    skip_audio["skip_audio<br/>记录无音轨限制"] --> visual_understanding
+    visual_understanding["visual_understanding<br/>复用分析 / 分批视觉识别"] --> speech_notes
+    speech_notes["summarize · speech_notes<br/>复用或逐段归纳转写"] --> evidence_router
+    evidence_router{"route_evidence<br/>证据是否需要压缩"}
+    evidence_router -->|yes| reduce_evidence
+    reduce_evidence["summarize · reduce_evidence<br/>分层压缩全部证据"] --> evidence_router
+    evidence_router -->|no| generate_summary
+    generate_summary["summarize · generate_summary<br/>生成结构化成稿"] --> validate_summary
+    validate_summary{"validate_summary<br/>字段 / 时间范围校验"}
+    validate_summary -->|valid| persist
+    validate_summary -->|invalid · first attempt| repair_summary
+    repair_summary["repair_summary<br/>仅修正一次"] --> validate_repair
+    validate_repair{"validate_repair<br/>再次校验"}
+    validate_repair -->|valid| persist
+    validate_repair -->|invalid| fail
+    persist["persist_result<br/>保存摘要、报告 / 更新历史"] --> END
+    fail["handle_error<br/>保存失败节点、错误与已有产物"] --> END
+    END(["END<br/>done / error"])
+
+    subgraph STATE["Workflow State · 任务目录与断点"]
+        direction LR
+        inputs["输入<br/>source_url / config / media SHA-256"]
+        artifacts["中间产物<br/>media / frames / transcript / observations / speech_notes"]
+        execution["执行状态<br/>node status / timings / errors / checkpoint"]
+        outputs["结果<br/>summary.json / report.md / history"]
+    end
+
+    checkpoint -.-> inputs
+    transcribe -.-> artifacts
+    visual_understanding -.-> artifacts
+    speech_notes -.-> artifacts
+    fail -.-> execution
+    persist -.-> outputs
+
+    classDef terminal fill:#eef2ff,stroke:#6366f1,stroke-width:2px,color:#1e1b4b;
+    classDef router fill:#fff7ed,stroke:#f59e0b,color:#7c2d12;
+    classDef failure fill:#fef2f2,stroke:#ef4444,color:#7f1d1d;
+    classDef state fill:#f8fafc,stroke:#94a3b8,color:#334155;
+    class START,END terminal;
+    class media_router,audio_router,evidence_router,validate_summary,validate_repair router;
+    class fail failure;
+    class inputs,artifacts,execution,outputs state;
 ```
 
 - **执行顺序**：抽帧、转写、画面理解、口播归纳和最终成稿顺序执行；图中的各入口共用处理能力。@队列允许预下载下一条，但不并行运行理解模型。@工具命中有效分析缓存时可直接复用已有结果。
