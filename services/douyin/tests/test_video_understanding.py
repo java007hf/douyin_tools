@@ -213,6 +213,16 @@ class UnderstandingTests(unittest.TestCase):
         media = sorted(extract_media_from_aweme(payload), key=understanding_media_rank)
         self.assertEqual(media[0].url, 'https://example.com/with-audio')
 
+    def test_local_asr_requires_complete_local_files(self):
+        from services.douyin.video_understanding import local_asr_model
+        with self.assertRaisesRegex(RuntimeError, '不会联网'):
+            local_asr_model(self.root, 'large-v3-turbo')
+        model = self.root / 'large-v3-turbo'
+        model.mkdir()
+        for name in ('model.bin', 'config.json', 'tokenizer.json', 'vocabulary.json'):
+            (model / name).write_text('{}', encoding='utf-8')
+        self.assertEqual(local_asr_model(self.root, 'large-v3-turbo'), model.resolve())
+
     def test_transcription_releases_ollama_before_loading_asr(self):
         self.release_patcher.stop()
         import types
@@ -229,10 +239,11 @@ class UnderstandingTests(unittest.TestCase):
             return MagicMock()
         with patch.dict('sys.modules', {'faster_whisper': types.SimpleNamespace(WhisperModel=factory)}), \
              patch('services.douyin.video_understanding.subprocess.run', return_value=probe), \
-             patch('services.douyin.video_understanding.store_root', return_value=self.root), \
+             patch('services.douyin.video_understanding.local_asr_model', return_value=self.root / 'small'), \
              patch('services.douyin.video_understanding.request.urlopen', side_effect=unload):
             transcribe(self.root / 'video.mp4', self.root, TEST_CONFIG, lambda *a: None)
         self.assertEqual(order, ['unload', 'asr'])
+        factory.assert_called_once_with(str(self.root / 'small'), device='cpu', compute_type='int8', local_files_only=True)
 
     def test_long_video_samples_at_most_twenty_frames_across_full_duration(self):
         from services.douyin.video_understanding import inspect_video, cv2

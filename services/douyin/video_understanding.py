@@ -172,6 +172,30 @@ def inspect_video(video: Path, root: Path):
         capture.release()
 
 
+def local_asr_model(model_cache, model_name):
+    """Resolve provisioned CTranslate2 weights without contacting a model hub."""
+    model_cache = Path(model_cache)
+    candidates = [model_cache / model_name, model_cache]
+    for repository in sorted(model_cache.glob(f"models--*--faster-whisper-{model_name}")):
+        ref = repository / "refs" / "main"
+        revision = ref.read_text(encoding="utf-8").strip() if ref.is_file() else ""
+        snapshots = repository / "snapshots"
+        if revision and Path(revision).name == revision:
+            candidates.append(snapshots / revision)
+        if snapshots.is_dir():
+            candidates.extend(sorted(snapshots.iterdir(), reverse=True))
+    for candidate in candidates:
+        required = [candidate / name for name in ("model.bin", "config.json", "tokenizer.json")]
+        vocabulary = [candidate / "vocabulary.json", candidate / "vocabulary.txt"]
+        if (all(path.is_file() and path.stat().st_size > 0 for path in required)
+                and any(path.is_file() and path.stat().st_size > 0 for path in vocabulary)):
+            return candidate.resolve()
+    raise RuntimeError(
+        f"本地语音模型 {model_name} 缺失或不完整。请将完整的 CTranslate2 模型文件放入 "
+        f"{model_cache / model_name}，或通过 DOUYIN_ASR_MODEL_DIR 指定模型目录。"
+        "语音识别仅加载本地文件，不会联网下载模型。")
+
+
 def transcribe(video, root, config, progress):
     import shutil
     ffprobe = shutil.which("ffprobe") or str(Path(r"C:\ProgramData\chocolatey\bin\ffprobe.exe"))
@@ -189,9 +213,10 @@ def transcribe(video, root, config, progress):
         raise ValueError("不支持的语音转写模型")
     model_cache = Path(os.environ.get("DOUYIN_ASR_MODEL_DIR") or store_root() / "models" / "whisper")
     model_cache.mkdir(parents=True, exist_ok=True)
-    progress(f"加载语音转写模型 {model_name}（首次使用需下载模型）")
+    model_path = local_asr_model(model_cache, model_name)
+    progress(f"加载本地语音转写模型 {model_name}（离线）")
     release_understanding_model(config, progress)
-    model = WhisperModel(model_name, device="cpu", compute_type="int8", download_root=str(model_cache))
+    model = WhisperModel(str(model_path), device="cpu", compute_type="int8", local_files_only=True)
     try:
         decoding = {"beam_size": 5, "vad_filter": True}
         if model_name == "large-v3-turbo":
