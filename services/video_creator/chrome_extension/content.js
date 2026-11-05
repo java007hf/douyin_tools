@@ -39,13 +39,32 @@
           const priority=input=>specificity(input)*2+(input.multiple?0:1);
           const inputs=candidates().sort((a,b)=>priority(a)-priority(b));
           if(!inputs.length||(inputs.length>1&&priority(inputs[0])===priority(inputs[1])))throw Error('Cannot uniquely identify image upload input');
-          const image=message.image;const bytes=Uint8Array.from(atob(image.data),c=>c.charCodeAt(0));
-          const transfer=new DataTransfer();transfer.items.add(new File([bytes],image.name,{type:image.mime}));
-          inputs[0].files=transfer.files;
-          inputs[0].dispatchEvent(new Event('change',{bubbles:true}));
-          await chrome.runtime.sendMessage({action:'event',payload:{stage:'reference_selected',ok:true}});
+          const image=message.image;
+          let cleared=0;
+          if(image.reset_before_upload){
+            // Remove only this tool's temporary draft references, never user attachments.
+            const owned=()=>[...document.querySelectorAll('.guidance-input-surface [role="button"][aria-label]')]
+              .filter(x=>/^doubao-bridge-/.test(x.getAttribute('aria-label')||''));
+            for(let i=0;i<30&&owned().length;i++){
+              const card=owned()[0];const remove=card.querySelector('[aria-label="delete"]');
+              if(!remove)throw Error('Cannot clear bridge reference attachments');
+              remove.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true}));
+              await new Promise(resolve=>setTimeout(resolve,100));
+              if(card.isConnected)throw Error('Cannot clear bridge reference attachments');
+              cleared++;
+            }
+          }
+          const input=candidates().sort((a,b)=>priority(a)-priority(b))[0];
+          if(!input)throw Error('Cannot uniquely identify image upload input');
+          const bytes=Uint8Array.from(atob(image.data),c=>c.charCodeAt(0));
+          const transfer=new DataTransfer();transfer.items.add(new File([bytes],'doubao-bridge-'+crypto.randomUUID()+'-'+image.name,{type:image.mime}));
+          input.value='';
+          input.files=transfer.files;
+          input.dispatchEvent(new Event('change',{bubbles:true}));
+          await chrome.runtime.sendMessage({action:'event',payload:{stage:'reference_selected',ok:true,ui:{cleared,input:{accept:input.accept,multiple:input.multiple,disabled:input.disabled,file_count:input.files.length}}}});
+
         }catch(error){
-          const reason=['Page bridge not ready','Cannot uniquely identify image upload input'].includes(error.message)?error.message:'Reference selection failed';
+          const reason=['Page bridge not ready','Cannot uniquely identify image upload input','Cannot clear bridge reference attachments'].includes(error.message)?error.message:'Reference selection failed';
           await chrome.runtime.sendMessage({action:'event',payload:{stage:'bridge_error',ok:false,reason,...diagnostics}});
         }
       })();

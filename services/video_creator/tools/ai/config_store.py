@@ -25,7 +25,7 @@ class ProviderConfigStore:
             matches = [x for x in self._read() if x.get("provider") == provider]
             return matches[-1] if matches else None
     def save(self, values: dict):
-        allowed = {"context_window", "api_format", "transcription_model", "name", "provider", "base_url", "model", "api_key", "token", "secret", "enabled", "defaults", "intent_system_prompt", "storyboard_system_prompt", "review_system_prompt", "default_video_provider_id", "default_video_model", "default_image_provider_id", "default_image_model", "default_t2v_provider_id", "default_t2v_model", "default_i2v_provider_id", "default_i2v_model", "default_r2v_provider_id", "default_r2v_model", "default_video_resolution", "default_video_aspect", "default_video_steps"}
+        allowed = {"context_window", "thinking_enabled", "output_token_limit", "use_model_sampling_defaults", "api_format", "transcription_model", "name", "provider", "base_url", "model", "api_key", "token", "secret", "enabled", "defaults", "intent_system_prompt", "storyboard_system_prompt", "review_system_prompt", "default_video_provider_id", "default_video_model", "default_image_provider_id", "default_image_model", "default_t2v_provider_id", "default_t2v_model", "default_i2v_provider_id", "default_i2v_model", "default_r2v_provider_id", "default_r2v_model", "default_video_resolution", "default_video_aspect", "default_video_steps"}
         with self.lock:
             items = self._read(); current = next((x for x in items if x.get("id") == values.get("id")), None)
             if current is None: current = {"id": uuid.uuid4().hex}; items.append(current)

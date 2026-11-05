@@ -87,7 +87,7 @@ def serve(port=18767,timeout=180,expected=1,image=None,progress=None,store_dir=N
                     with lock:
                         value=None
                         if commands and report['committed']>=delivered:
-                            value=commands.pop(0);delivered+=1
+                            value=commands.pop(0);value['reset_before_upload']=delivered==0;delivered+=1
                             report['events'].append({'stage':'reference_dispatched','index':delivered});save()
                     self.send(200,{'image':value})
                 elif self.path=='/upload':
@@ -103,6 +103,8 @@ def serve(port=18767,timeout=180,expected=1,image=None,progress=None,store_dir=N
                     uris=[u for u in value.get('uris',[]) if isinstance(u,str) and u.startswith('tos-cn-i-a9rns2rl98/') and '?' not in u][:10]
                     with lock:
                         event={'stage':stage,'ok':value.get('ok') is True,'uris':uris}
+                        if stage=='reference_selected' and isinstance(value.get('ui'),dict):
+                            ui=value['ui'];event['ui']={'cleared':ui.get('cleared',0),'input':{k:ui.get('input',{}).get(k) for k in ('accept','multiple','disabled','file_count')}}
                         if stage=='apply':
                             hosts=[host for host in value.get('hosts',[]) if isinstance(host,str) and any(host.endswith('.'+domain) for domain in ('snssdk.com','doubao.com','byteimg.com','bytedance.com','bytedancevod.com')) and urlsplit('https://'+host).hostname==host]
                             allowed_hosts.update(hosts);event['hosts']=hosts
@@ -110,7 +112,7 @@ def serve(port=18767,timeout=180,expected=1,image=None,progress=None,store_dir=N
                         if stage=='upload_route':
                             event.update(host=str(value.get('host',''))[:200],transport=value.get('transport'),bridged=value.get('bridged') is True)
                         if stage=='bridge_error':
-                            event['reason']=value.get('reason') if value.get('reason') in {'Page bridge not ready','Cannot uniquely identify image upload input','Reference selection failed'} else 'Upload transport failed'
+                            event['reason']=value.get('reason') if value.get('reason') in {'Page bridge not ready','Cannot uniquely identify image upload input','Reference selection failed','Cannot clear bridge reference attachments'} else 'Upload transport failed'
                             event['inputs']=[{k:x.get(k) for k in ('accept','multiple','disabled','visible')} for x in value.get('inputs',[]) if isinstance(x,dict)][:20]
                         report['events'].append(event)
                         if stage=='commit' and value.get('ok') is True:

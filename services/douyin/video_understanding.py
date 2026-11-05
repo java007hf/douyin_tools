@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 
 import cv2
 from services.core.storage import store_root
+from services.core.understanding_queue import shared_slot
 from services.douyin.understanding_prompts import AUTHOR_SYSTEM_PROMPT, SUMMARY_STYLE_VERSION
 
 _analysis_lock = threading.Lock()
@@ -63,6 +64,10 @@ class UnderstandingProvider:
         self.config = validate_config(config)
 
     def complete(self, prompt, images=(), *, max_tokens=4096, context_limit=None, system_prompt=None):
+        with shared_slot(platform='理解模型调用'):
+            return self._complete(prompt, images, max_tokens=max_tokens, context_limit=context_limit, system_prompt=system_prompt)
+
+    def _complete(self, prompt, images=(), *, max_tokens=4096, context_limit=None, system_prompt=None):
         content = [{"type": "text", "text": prompt}]
         for image in images:
             encoded = base64.b64encode(image.read_bytes()).decode("ascii")
@@ -124,6 +129,13 @@ class UnderstandingProvider:
 
 
 def release_understanding_model(config, progress):
+    if config.get('api_format') != 'ollama':
+        return
+    with shared_slot(platform='理解模型卸载', progress=progress):
+        return _release_understanding_model(config, progress)
+
+
+def _release_understanding_model(config, progress):
     if config.get('api_format') != 'ollama':
         return
     progress('释放本地理解模型内存，准备媒体处理')
@@ -312,6 +324,12 @@ def resolve_work_link(url):
 
 
 def understand_work(url, root, download, config, progress):
+    platform = 'YouTube' if 'youtu' in (urlsplit(url).hostname or '') else '抖音'
+    with shared_slot(task_id=Path(root).name, platform=platform, progress=progress):
+        return _understand_work(url, root, download, config, progress)
+
+
+def _understand_work(url, root, download, config, progress):
     """Own all processing and task artifacts; HTTP handlers only start this task."""
     config = validate_config(config)
     root.mkdir(parents=True, exist_ok=True)

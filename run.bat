@@ -9,7 +9,7 @@ echo Restarting Douyin workspace services...
 echo Stopping previous gateway and tab services...
 
 rem Clear listeners from the previous run so updated source files are loaded.
-for %%P in (8003 8101 8102 8103) do (
+for %%P in (8003 8101 8102 8103 8104) do (
     for /f "tokens=5" %%I in ('netstat -ano ^| findstr /R /C:":%%P .*LISTENING"') do (
         taskkill /PID %%I /T /F >nul 2>&1
     )

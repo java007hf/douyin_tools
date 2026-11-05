@@ -84,6 +84,20 @@ class ComfyUIClient:
         body = self._request("/progress")[2]
         return json.loads(body) if body else {}
 
+    def release_models(self) -> None:
+        """Release idle model caches before the shared GPU returns to the LLM."""
+        queue = self.queue_state()
+        if queue.get('queue_running') or queue.get('queue_pending'):
+            raise ComfyUIError('ComfyUI 还有其他任务，不能确认本地模型已释放')
+        self._request('/free', json.dumps({'unload_models': True, 'free_memory': True}).encode(),
+                      'POST', {'Content-Type': 'application/json'})
+        for _ in range(30):
+            stats = json.loads(self._request('/system_stats')[2])
+            if all(d.get('type') == 'cpu' or float(d.get('torch_vram_total', 0)) < 256 * 1024**2 for d in stats.get('devices', [])):
+                return
+            time.sleep(.5)
+        raise ComfyUIError('ComfyUI 模型显存释放未确认，请检查本地任务状态')
+
     def cancel(self, prompt_id: str) -> bool:
         """Remove a queued prompt or interrupt it when it is the active prompt."""
         prompt_id = str(prompt_id or "")

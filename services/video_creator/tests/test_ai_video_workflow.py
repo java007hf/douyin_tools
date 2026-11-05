@@ -16,6 +16,53 @@ class FakeLLM:
 
 
 class AIVideoWorkflowTests(unittest.TestCase):
+    def test_story_development_failure_prevents_media_generation(self):
+        class BrokenWriter:
+            def complete_json(self, system, prompt):
+                return {'candidates': []}
+        with tempfile.TemporaryDirectory() as directory:
+            context = WorkflowContext('reject-story', Path(directory), '搞笑故事', params={'total_duration': 24})
+            calls = []
+            snapshots = []
+            workflow = AIVideoWorkflow(BrokenWriter(), lambda *args: calls.append('video'), snapshots.append,
+                                      generate_image=lambda *args: calls.append('image'))
+            with self.assertRaisesRegex(ValueError, '三个候选'):
+                workflow.run(context)
+            self.assertEqual(calls, [])
+            self.assertEqual(snapshots[-1][0]['id'], 'develop_story')
+            self.assertEqual(snapshots[-1][0]['status'], 'failed')
+            self.assertTrue(all(n['status'] == 'pending' for n in snapshots[-1][1:]))
+
+    def test_storyboard_receives_selected_model_story(self):
+        class Planner:
+            def complete_json(self, system, prompt):
+                self.system, self.prompt = system, prompt
+                return {'shots': [{'duration_seconds': 5, 'prompt': 'scene'}]}
+        with tempfile.TemporaryDirectory() as directory:
+            planner = Planner()
+            context = WorkflowContext('selected-story', Path(directory), '搞笑故事', params={'total_duration': 5})
+            context.artifacts['story_development'] = {'selected': {'title': '模型原稿', 'beats': []}}
+            AIVideoWorkflow(planner, None, lambda _: None)._storyboard(context)
+            self.assertIn('模型原稿', planner.prompt)
+            self.assertIn('不得重新编造', planner.system)
+
+    def test_keyframe_generation_receives_bound_asset_ids(self):
+        with tempfile.TemporaryDirectory() as root:
+            context=WorkflowContext('keyframe-test',Path(root),'brief')
+            shot={'id':'shot-1','sequence':1,'depends_on':[], 'prompt':'a funny scene',
+                  'asset_bindings':{'character_ids':['pig','spider']},
+                  'generation_plan':{'mode':'image_then_i2v','reference_asset_ids':['pig','spider']}}
+            context.artifacts.update(storyboard=[shot],assets={})
+            captured=[]
+            def image(spec,ctx):
+                captured.append(spec)
+                return Path(root)/'keyframe.png'
+            workflow=AIVideoWorkflow(None,lambda s,c:Path(root)/'video.mp4',lambda n:None,generate_image=image)
+            workflow._generate(context)
+            self.assertEqual(captured[0]['reference_asset_ids'],['pig','spider'])
+            self.assertEqual(captured[0]['asset_bindings'],shot['asset_bindings'])
+            self.assertEqual(context.artifacts['active_reference_images'],[Path(root)/'keyframe.png'])
+
     def test_storyboard_contract_requires_resolution_and_audible_design(self):
         result={"creative_intent":{},"shots":[
             {"story_function":"setup","duration_seconds":2,"audio":{"dialogue":"","sound_effects":"脚步","ambience":"风声"}},
@@ -48,6 +95,18 @@ class AIVideoWorkflowTests(unittest.TestCase):
             self.assertIn("no_dialogue 仅表示没有语言",planner.system)
             self.assertIn("变形镜头只表现变形主体",planner.system)
             self.assertIn("人物集合变化时禁止继承",planner.system)
+
+    def test_comedy_rules_are_conditional_and_apply_to_custom_prompts(self):
+        class Planner:
+            def complete_json(self,system,prompt):
+                self.system=system
+                return {'shots':[{'duration_seconds':5,'prompt':'scene'}]}
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);planner=Planner()
+            workflow=AIVideoWorkflow(planner,lambda s,c:root/'unused.mp4',lambda n:None,prompts={'storyboard':'custom prompt'})
+            for brief,expected in [('猪八戒和蜘蛛精的搞笑故事',True),('严肃历史纪录片',False)]:
+                workflow._storyboard(WorkflowContext('conditional',root,brief,params={'total_duration':5}))
+                self.assertEqual('喜剧创作补充' in planner.system,expected)
 
     def test_compiles_explicit_mandarin_or_no_dialogue_audio_contract(self):
         dialogue=AIVideoWorkflow._compile_video_prompt({"audio":{"speaker":"蜘蛛精","dialogue":"现在，还觉得我好看吗？","speech_timing":"0.8-2.8秒"}}, {})

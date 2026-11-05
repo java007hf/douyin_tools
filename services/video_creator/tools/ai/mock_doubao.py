@@ -25,6 +25,22 @@ KNOWN_IMAGE_MODELS = {
 }
 
 
+def redact_response_text(text, config):
+    detail = str(text)
+    for group in (config.get('headers', {}), config.get('query', {})):
+        for name, secret in group.items():
+            if isinstance(secret, str) and len(secret) >= 8:
+                detail = detail.replace(secret, '[已隐藏]')
+                if str(name).lower() == 'cookie':
+                    for cookie in secret.split(';'):
+                        value = cookie.partition('=')[2].strip()
+                        if len(value) >= 8:detail = detail.replace(value, '[已隐藏]')
+    detail = re.sub(r'https?://[^\s\"<>]+', '[URL]', detail)
+    detail = re.sub(r'(?i)(bearer\s+)[^\s,;]+', r'\1[已隐藏]', detail)
+    detail = re.sub(r'''(?i)((?:token|cookie|authorization|api[_-]?key|signature|sessionid)\s*["']?\s*[=:]\s*["']?)[^\s,;"'}]+''', r'\1[已隐藏]', detail)
+    return detail
+
+
 def response_error(value: dict, config: dict) -> str | None:
     error = value.get("error")
     code = value.get("status_code", value.get("code"))
@@ -34,14 +50,7 @@ def response_error(value: dict, config: dict) -> str | None:
     code = nested.get("code", code)
     label = str(code) if isinstance(code, (str, int)) and re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", str(code)) else "unknown"
     detail = str(nested.get("message") or value.get("status_desc") or value.get("message") or value.get("msg") or "")
-    # A provider can echo request material. Never copy session values into task errors.
-    for group in (config.get("headers", {}), config.get("query", {})):
-        for secret in group.values():
-            if isinstance(secret, str) and len(secret) >= 8:
-                detail = detail.replace(secret, "[已隐藏]")
-    detail = re.sub(r"https?://[^\s\"<>]+", "[URL]", detail)
-    detail = re.sub(r"(?i)(bearer\s+)[^\s,;]+", r"\1[已隐藏]", detail)
-    detail = re.sub(r"(?i)((?:token|cookie|authorization|api[_-]?key|signature|sessionid)\s*[=:]\s*)[^\s,;]+", r"\1[已隐藏]", detail)
+    detail = redact_response_text(detail, config)
     hint = "登录已失效，请在后台控制更新有效请求模板" if str(code) in {"710012001", "401", "403"} else "请检查请求模板、签名与账号状态"
     if str(code) == "710022002":
         hint = "豆包限制当前服务访问频率，已停止提交；请稍后手动重试"

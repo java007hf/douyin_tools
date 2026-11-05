@@ -6,11 +6,11 @@ import json
 import time
 import uuid
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, parse_qsl
 
 import requests
 
-from .mock_doubao import extract_images, response_error
+from .mock_doubao import extract_images, response_error, redact_response_text
 from .providers import ProviderError
 
 
@@ -111,6 +111,32 @@ def build_web_request(config, prompt, *, model=None, style=None, aspect=None, re
     return url, headers, body
 
 
+def response_excerpt(value, config):
+    """Keep bounded assistant/error text, never raw request or streaming payloads."""
+    fragments = []
+    def visit(node, depth=0):
+        if depth > 8:return
+        if isinstance(node, str):
+            if node[:1] in ('{', '['):
+                try:visit(json.loads(node), depth+1)
+                except ValueError:pass
+        elif isinstance(node, list):
+            for item in node[:20]:visit(item, depth+1)
+        elif isinstance(node, dict):
+            for key, item in node.items():
+                if key in {'text','message','status_desc','msg','reason','error_message'} and isinstance(item,str) and item.strip():
+                    container = False
+                    if item[:1] in ('{','['):
+                        try:container=isinstance(json.loads(item),(dict,list))
+                        except ValueError:pass
+                    if not container:
+                        clean=redact_response_text(item,config)[:500]
+                        if clean not in fragments:fragments.append(clean)
+                visit(item,depth+1)
+    visit(value)
+    return ' | '.join(fragments[-4:])[:800]
+
+
 class DoubaoWebImageProvider:
     def __init__(self, config_path: Path):
         self.config_path=config_path
@@ -148,6 +174,10 @@ class DoubaoWebImageProvider:
             except ValueError:
                 raise ProviderError('豆包网页返回了无法解析的流式事件；未重新提交') from None
             trace['parsed_events'] += 1
+            kinds = trace.setdefault('event_types', [])
+            if event and event not in kinds and len(kinds)<16:kinds.append(event[:80])
+            excerpt = response_excerpt(value, {'headers':headers,'query':dict(parse_qsl(urlsplit(url).query))})
+            if excerpt:trace['response_text']=excerpt
             if isinstance(value, dict):
                 failure = response_error(value, {'headers':headers})
                 if failure:
@@ -184,7 +214,9 @@ class DoubaoWebImageProvider:
         except requests.RequestException:
             raise ProviderError('豆包网页网络请求失败，原请求可能已提交；未重新发送') from None
         if not urls:
-            raise ProviderError(f'豆包网页响应结束但没有生成图片（事件 {trace["parsed_events"]}）；未重新提交')
+            trace['failure_kind']='no_image_output'
+            detail = '：' + trace['response_text'] if trace.get('response_text') else '；服务未提供可识别的错误说明'
+            raise ProviderError(f'豆包网页响应结束但没有生成图片（事件 {trace["parsed_events"]}）{detail}；未重新提交')
         if not trace['reply_end']:
             raise ProviderError('豆包网页流未完整结束，不能确认生成完成；未重新提交')
         return urls

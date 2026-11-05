@@ -10,6 +10,8 @@ from services.video_creator.workflow.engine import WorkflowEngine
 from services.video_creator.workflow.models import WorkflowNode
 from services.video_creator.workflow.prompts import DEFAULT_REVIEW_PROMPT, DEFAULT_STORYBOARD_PROMPT, LEARNED_PRODUCTION_RULES
 from services.video_creator.workflow.plot_library import retrieve_plot_references
+from services.video_creator.workflow.comedy_prompts import comedy_rules_for
+from services.video_creator.workflow.story_development import develop_comedy
 
 
 class AIVideoWorkflow:
@@ -29,12 +31,31 @@ class AIVideoWorkflow:
             (WorkflowNode("review", "AI 审片"), self._review),
             (WorkflowNode("compose", "合成短视频"), self._compose),
         ]
+        if comedy_rules_for(context.brief) and not context.params.get('_cached_storyboard'):
+            story_node = WorkflowNode('develop_story', '生成、评审与修订喜剧剧情')
+            def report_story_progress(state):
+                stage = state.get('stage')
+                story_node.message = {'generate': '生成三个剧情候选', 'review': f"第 {state.get('round', 0) + 1} 轮剧情评审",
+                    'rewrite': '按模型评审重写剧情', 'selected': '已选定剧情'}.get(stage, state.get('error', '剧情开发中'))
+                story_node.output = dict(state)
+                self.on_change([node.as_dict() for node, _ in nodes])
+            nodes.insert(0, (story_node, lambda ctx: self._develop_story(ctx, on_progress=report_story_progress)))
         WorkflowEngine(nodes, self.on_change).run(context)
         return {"creative_intent":context.artifacts["creative_intent"],"continuity_bible":context.artifacts["continuity_bible"],"storyboard": context.artifacts["storyboard"], "review": context.artifacts["review"], "output": context.artifacts["output"]}
+
+    def _develop_story(self, context, on_progress=None):
+        try:
+            result = develop_comedy(self.llm, context.brief, float(context.params['total_duration']), context.task_dir, on_progress=on_progress)
+        finally:
+            context.artifacts['story_development_files'] = [path.relative_to(context.task_dir).as_posix()
+                for path in sorted((context.task_dir / 'story_development').glob('*.json'))]
+        context.artifacts['story_development'] = result
+        return {'message': '已选定模型评审通过的剧情', 'artifact_files': context.artifacts['story_development_files'], **result}
 
     def _storyboard(self, context):
         prompt = json.dumps({
             "brief": context.brief,
+            "approved_story": context.artifacts.get('story_development', {}).get('selected'),
             "has_reference_image": bool(context.reference_image),
             "has_reference_video": bool(context.reference_video),
             "total_duration_seconds": context.params["total_duration"],
@@ -63,8 +84,12 @@ class AIVideoWorkflow:
         }, ensure_ascii=False)
         system_prompt=self.prompts.get("storyboard") or DEFAULT_STORYBOARD_PROMPT
         system_prompt += "\n\n" + LEARNED_PRODUCTION_RULES
+        if comedy_rules_for(context.brief):
+            system_prompt += '\n\n' + comedy_rules_for(context.brief)
+        if context.artifacts.get('story_development'):
+            system_prompt += '\napproved_story 是已完成独立评审的模型剧情。将其转为可执行分镜，保留动机、规则、台词、动作因果和结局；不得重新编造另一段故事或添加未铺垫的反转。'
         system_prompt += "\n\n强制资产规则：必须先建资产再拍镜头。每个主要或跨镜头角色、固定地点和关键道具都要解析到 continuity_bible.assets 中的现有资产，或新增 source=generate_image 的独立资产规格；characters、locations、props 的 reference_asset_id 以及每个镜头的 asset_bindings/reference_asset_ids 必须引用这些真实资产 ID。猪八戒、九齿钉耙等不得只保留文字描述。镜头首尾帧仅用于运行时衔接，绝不是长期资产。"
-        result = self.llm.complete_json(system_prompt, prompt)
+        result = context.params.get('_cached_storyboard') or self.llm.complete_json(system_prompt, prompt)
         if context.params.get("_enforce_story_arc"):
             issues=self._storyboard_contract_issues(result,float(context.params["total_duration"]))
             if issues:
@@ -194,6 +219,10 @@ class AIVideoWorkflow:
             ))
             shot["continuity"]["asset_dependencies"]=shot["asset_dependencies"]
             shot["generation_plan"]=plan
+            if context.params.get('single_image_video') and plan['mode'] in {'reference_pack_i2v', 'previous_frame_i2v'}:
+                # Compose a fresh keyframe from visible assets before a single-image
+                # video call; a tail frame alone can carry the wrong character.
+                plan['mode'] = 'image_then_i2v'
             shot["reference_strategy"]="r2v" if plan["mode"]=="r2v" else "reference_pack_i2v" if plan["mode"]=="reference_pack_i2v" else "i2v" if plan["mode"] in {"i2v","image_then_i2v","previous_frame_i2v"} else "t2v"
             shot["generation_plan"]["video_prompt"] = self._compile_video_prompt(shot, bible)
         context.artifacts["storyboard"] = shots
@@ -330,7 +359,7 @@ class AIVideoWorkflow:
             "base_prompt": shot.get("generation_plan",{}).get("video_prompt") or shot.get("prompt",{}),
         }
         audio_rule=("音频模式为 dialogue：只允许指定说话者使用标准普通话逐字说出给定台词，不得改写、翻译、增加台词或产生其他人声；在指定时间窗内自然口型同步。" if has_dialogue else "音频模式为 no_dialogue：所有人物保持沉默且无说话口型；禁止生成任何人声、拟语音、耳语、哼唱或含混语言，只允许明确列出的环境声和音效。")
-        return "MiniMax H3 executable shot plan: " + json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "。"+audio_rule+"保持锁定资产一致。画面中禁止字幕、台词文字、招牌文字、Logo、水印和任何可读文字，避免生成乱码；不要新增角色、服装或道具。"
+        return "请立即使用已选择的模型实际生成视频，不要只回复文字计划、不要等待确认。模型和时长已在界面确认。请实际调用视频生成工具，不要用正在渲染等文字替代生成任务。镜头执行计划：" + json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "。"+audio_rule+"保持锁定资产一致。画面中禁止字幕、台词文字、招牌文字、Logo、水印和任何可读文字，避免生成乱码；不要新增角色、服装或道具。"
 
     def _prepare_assets(self, context):
         if context.params.get("confirm_assets") and self.confirm_assets:
@@ -435,7 +464,9 @@ class AIVideoWorkflow:
                 referenced=[context.artifacts["assets"].get(str(asset_id)) for asset_id in plan.get("reference_asset_ids",[])];referenced=[item for item in referenced if item]
                 if mode=="image_then_i2v":
                     if not self.generate_image: raise RuntimeError("image_then_i2v 需要 generate_image 工具")
-                    reference_image=self.generate_image({"id":shot["id"]+"_keyframe","prompt":plan.get("image_prompt") or shot["prompt"],"kind":"shot_keyframe"},context)
+                    reference_image=self.generate_image({"id":shot["id"]+"_keyframe","prompt":plan.get("image_prompt") or shot["prompt"],"kind":"shot_keyframe",
+                                                         "reference_asset_ids":plan.get('reference_asset_ids', []),
+                                                         "asset_bindings":shot.get('asset_bindings', {})},context)
                     context.artifacts["assets"][shot["id"]+"_keyframe"]=reference_image
                 elif mode=="previous_frame_i2v":
                     if not shot["depends_on"]: raise ValueError(f"{shot['id']} 使用 previous_frame_i2v 但没有 depends_on")

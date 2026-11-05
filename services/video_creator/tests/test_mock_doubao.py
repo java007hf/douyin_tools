@@ -145,6 +145,24 @@ class MockDoubaoTests(unittest.TestCase):
         self.assertIn('当前服务访问频繁', str(caught.exception))
         self.assertEqual(post.call_count, 1)
 
+    def test_web_no_image_keeps_redacted_explanation_and_does_not_resubmit(self):
+        from services.video_creator.tools.ai.doubao_web import DoubaoWebImageProvider
+        from services.video_creator.tools.ai.image_priority import daily_quota_exhausted
+        web=DoubaoWebImageProvider(self.path)
+        response=MagicMock(status_code=200);response.__enter__.return_value=response
+        response.iter_lines.return_value=['event: SSE_REPLY_DELTA','data: '+json.dumps({'content':json.dumps({'text':'今日生图次数已用完。private-token token=abc https://example.test/private'})}),
+                                         '', 'event: SSE_REPLY_END','data: {}','']
+        trace={}
+        with patch('services.video_creator.tools.ai.doubao_web.build_web_request',return_value=('https://www.doubao.com/chat/completion',{'Cookie':'private-token'},{})), \
+             patch('services.video_creator.tools.ai.doubao_web.requests.post',return_value=response) as post:
+            with self.assertRaises(ProviderError) as error:web.generate('test',diagnostics=trace)
+        self.assertEqual(post.call_count,1)
+        self.assertTrue(trace['reply_end'])
+        self.assertEqual(trace['failure_kind'],'no_image_output')
+        self.assertNotIn('private-token',trace['response_text'])
+        self.assertNotIn('example.test',trace['response_text'])
+        self.assertTrue(daily_quota_exhausted(str(error.exception)))
+
 
 if __name__ == "__main__":
     unittest.main()

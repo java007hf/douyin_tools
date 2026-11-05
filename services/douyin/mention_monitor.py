@@ -430,17 +430,16 @@ class MentionMonitor:
                 row['progress'] = message
                 self.save(row)
             if self.agent:
-                from services.douyin.video_understanding import _analysis_lock
-                # The MCP subprocess has its own lock; arbitrate manual analysis here.
-                with _analysis_lock:
-                    if self.inference_health:
-                        try:
-                            self.agent.check_health(progress)
-                        except Exception as exc:
-                            self.defer_inference_failure(row, exc, probe=True)
-                            return
-                        self.save_inference_health({})
-                    row['analysis'], row['reply'] = self.agent.run(row, root, progress)
+                # Model operations and MCP analysis share cross-process admission.
+                # Never hold the old local lock while waiting on an MCP subprocess.
+                if self.inference_health:
+                    try:
+                        self.agent.check_health(progress)
+                    except Exception as exc:
+                        self.defer_inference_failure(row, exc, probe=True)
+                        return
+                    self.save_inference_health({})
+                row['analysis'], row['reply'] = self.agent.run(row, root, progress)
             else:
                 row['analysis'] = self.analyze(row['source_url'], root, progress)
                 progress('视频分析完成，正在生成评论回复')

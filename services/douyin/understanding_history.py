@@ -69,6 +69,8 @@ class UnderstandingHistory:
                 title TEXT NOT NULL, report_file TEXT NOT NULL, report_markdown TEXT NOT NULL,
                 video_cache_file TEXT NOT NULL, result_json TEXT NOT NULL)""")
             db.execute("CREATE TABLE IF NOT EXISTS deleted_understanding_history (id TEXT PRIMARY KEY)")
+        from services.douyin.publishing.store import PublicationStore
+        self.publications = PublicationStore(self.path)
 
     def connect(self):
         return sqlite3.connect(self.path, timeout=30)
@@ -138,7 +140,11 @@ class UnderstandingHistory:
             result = json.loads(item.pop('result_json'))
             item.update(record_source=result.get('record_source', 'manual'), reply_username=result.get('reply_username', ''), reply_status=result.get('reply_status', ''), progress=result.get('progress', ''), reply_error=result.get('reply_error', ''))
             item['queue_position'] = positions.get(item['id'])
+            item['analysis_ready'] = result.get('analysis_ready', bool(result.get('summary')))
             items.append(item)
+        publications = self.publications.summaries([item['id'] for item in items])
+        for item in items:
+            item['publications'] = publications.get(item['id'], [])
         return {"items": items, "total": total}
 
     def save_mention(self, root, row):
@@ -160,7 +166,11 @@ class UnderstandingHistory:
     def get(self, identifier):
         with self.connect() as db:
             row = db.execute("SELECT result_json FROM understanding_history WHERE id=?", (identifier,)).fetchone()
-        return json.loads(row[0]) if row else None
+        if not row:
+            return None
+        result = json.loads(row[0])
+        result['publications'] = self.publications.list(identifier)
+        return result
 
     def backfill(self):
         mentions = self.download_root / 'mentions'
@@ -189,6 +199,9 @@ class UnderstandingHistory:
 
     def delete(self, identifier):
         with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if db.execute("SELECT 1 FROM publication_batches WHERE history_id=? AND status IN ('pending','running')", (identifier,)).fetchone():
+                raise ValueError('内容正在生成，请等待完成后再删除历史')
             deleted = db.execute("DELETE FROM understanding_history WHERE id=?", (identifier,)).rowcount
             if deleted:
                 db.execute("INSERT OR IGNORE INTO deleted_understanding_history VALUES (?)", (identifier,))

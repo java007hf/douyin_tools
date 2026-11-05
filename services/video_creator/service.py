@@ -12,7 +12,7 @@ from services.video_creator.tools.ai.providers import MiniMaxImageProvider, Mini
 from services.video_creator.tools.ai.doubao_web_video import DoubaoWebVideoProvider, MODELS as DOUBAO_VIDEO_MODELS, OPTIONS as DOUBAO_VIDEO_OPTIONS, validate_video
 from services.video_creator.tools.ai.doubao_web import DoubaoWebImageProvider, OPTIONS as DOUBAO_WEB_OPTIONS
 from services.video_creator.tools.ai.generation_routes import image_generation_fields
-from services.video_creator.tools.ai.llm import LLMError, OpenAICompatibleLLM
+from services.video_creator.tools.ai.llm import LLMError, OpenAICompatibleLLM, create_agent_llm
 from services.video_creator.tools.video.extract_frames import extract_frames
 from services.video_creator.tools.video.keyframes import extract_boundary_frames
 from services.video_creator.tools.video.silence import ensure_non_dialogue_audio
@@ -93,9 +93,16 @@ def cloudinary_upload(config: dict, filename: str, data: bytes) -> str:
 
 def save_remote_asset(url: str, target: Path) -> None:
     """Copy short-lived cloud output URLs into the persistent local asset area."""
-    req = request.Request(url, headers={"User-Agent": "DouyinWorkspace/1.0", "Accept": "*/*"})
-    with request.urlopen(req, timeout=180) as response:
-        data=response.read()
+    import requests
+    if parse.urlsplit(url).scheme not in {'http','https'}: raise ValueError('媒体下载地址必须是 HTTP/HTTPS')
+    for attempt in range(2):
+        try:
+            with requests.get(url,headers={"User-Agent":"DouyinWorkspace/1.0","Accept":"*/*"},timeout=(15,180)) as response:
+                response.raise_for_status()
+                data=response.content
+            break
+        except requests.RequestException:
+            if attempt: raise ProviderError('媒体下载失败；生成已提交，请先检查网络和远端结果') from None
     if not data: raise ValueError("云端返回了空的图片内容")
     target.write_bytes(data)
 
@@ -450,8 +457,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
             brief=str(form.getvalue("prompt") or "").strip()
             if not brief: raise ValueError("请输入视频创作要求")
             agent_config=self.server.providers.get_by_provider("ai_video_agent") or {}
-            if not agent_config or agent_config.get("enabled") is False or not (agent_config.get("api_key") or agent_config.get("token")): raise LLMError("请先在后台控制的 AI视频 中配置并启用 Agent 模型")
+            llm = create_agent_llm(agent_config)
+            last_llm_progress=[0.0]
+            def llm_progress(size):
+                if job in self.server.cancelled_jobs: raise LLMError("任务已取消")
+                if time.monotonic()-last_llm_progress[0]>5:
+                    last_llm_progress[0]=time.monotonic()
+                    self.server.jobs.update(job,message=f"Ollama 正在处理剧情/规划/审片，已接收 {size} 字符（含思考进度）")
+            llm.on_progress=llm_progress
             job=self.server.jobs.create(); task=self.server.store_dir/"ai_video_jobs"/job; task.mkdir(parents=True,exist_ok=True)
+            resume_storyboard=None
+            source_job=str(form.getvalue('retry_source_job') or '').strip()
+            if source_job:
+                source_state=self.server.jobs.get(source_job) or {}
+                if source_state.get('kind')!='ai_video' or source_state.get('status')!='error': raise ValueError('只能续跑失败的 AI视频任务')
+                source_dir=self.server.store_dir/'ai_video_jobs'/source_job
+                resume_storyboard=json.loads((source_dir/'storyboard.json').read_text(encoding='utf-8'))
+                for asset_path in [*source_dir.glob('asset_*.png'),*source_dir.glob('shot_*.mp4')]:
+                    shutil.copy2(asset_path,task/asset_path.name)
             def save(field, default):
                 item=form[field] if field in form else None
                 if item is None or not getattr(item,"filename",""): return None
@@ -475,9 +498,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             base=f"http://{'127.0.0.1' if host in ('0.0.0.0','::') else host}:{self.server.server_address[1]}"
             def run():
                 try:
-                    # A full storyboard contains a structured plan for every shot and can take several minutes on reasoning models.
-                    llm=OpenAICompatibleLLM(str(agent_config.get("base_url") or "https://api.openai.com/v1"),str(agent_config.get("api_key") or agent_config.get("token")),str(agent_config.get("model") or "gpt-4o-mini"),600)
                     workflow_params=dict(params)
+                    if resume_storyboard: workflow_params['_cached_storyboard']=resume_storyboard
+                    if source_job: workflow_params['retry_source_job']=source_job
+                    i2v_provider=self.server.providers.get(str(agent_config.get('default_i2v_provider_id') or '')) or {}
+                    workflow_params['single_image_video']=i2v_provider.get('provider')=='mock_doubao'
                     workflow_params["_enforce_story_arc"]=True
                     workflow_params["_available_library_assets"]=[{"id":item.get("id"),"name":item.get("name"),"kind":item.get("kind"),"description":item.get("description",{}),"href":item.get("href","")} for item in self.server.asset_library.list()[:100]]
                     context=WorkflowContext(job,task,brief+asset_prompt_context(selected_assets),image,video,workflow_params)
@@ -535,7 +560,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             plan=shot.setdefault("generation_plan",{});plan["reference_mapping"]=mapping
                             tags=" ".join(f"<Picture {index+1}> = <asset:{item['asset_id']}>." for index,item in enumerate(mapping))
                             shot_prompt=tags+" Generate a new shot from the written plan, do not treat either reference as a static poster. Absolutely no subtitles, captions, dialogue text, signs, logos, watermarks or any readable text in the image. "+shot_prompt
-                        fields={"provider_id":str(agent_config.get(f"default_{route}_provider_id") or agent_config.get("default_video_provider_id") or "local"),"model":str(agent_config.get(f"default_{route}_model") or agent_config.get("default_video_model") or ""),"prompt":shot_prompt,"duration":str(shot.get("duration_seconds") or 5),"resolution":str(agent_config.get("default_video_resolution") or "768p"),"aspect":str(agent_config.get("default_video_aspect") or "16:9"),"steps":str(agent_config.get("default_video_steps") or "24"),"reference_count":str(len(active_images)),"reference_asset_ids":json.dumps(active_asset_ids,ensure_ascii=False),**({"workflow_mode":"reference_pack_i2v"} if mode=="reference_pack_i2v" else {})}
+                        fields={"provider_id":str(agent_config.get(f"default_{route}_provider_id") or agent_config.get("default_video_provider_id") or "local"),"model":str(agent_config.get(f"default_{route}_model") or agent_config.get("default_video_model") or ""),"prompt":shot_prompt,"duration":format(float(shot.get("duration_seconds") or 5),"g"),"resolution":str(agent_config.get("default_video_resolution") or "768p"),"aspect":str(agent_config.get("default_video_aspect") or "16:9"),"steps":str(agent_config.get("default_video_steps") or "24"),"reference_count":str(len(active_images)),"reference_asset_ids":json.dumps(active_asset_ids,ensure_ascii=False),**({"workflow_mode":"reference_pack_i2v"} if mode=="reference_pack_i2v" else {})}
                         if active_image==ctx.reference_image and params.get("image_url"): fields["image_url"]=params["image_url"]
                         if active_video==ctx.reference_video and params.get("video_url"): fields["video_url"]=params["video_url"]
                         clip=invoke("video",fields,files,target)
@@ -547,7 +572,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     def generate_image(spec,ctx):
                         fields=image_generation_fields(agent_config,spec,ctx.brief,self.server.providers.get(str(agent_config.get('default_image_provider_id') or '')))
                         asset_id="".join(char for char in str(spec.get("id") or uuid.uuid4().hex) if char.isalnum() or char in "-_") or uuid.uuid4().hex
-                        return invoke("image",fields,{},task/f"asset_{asset_id}.png")
+                        existing=task/f'asset_{asset_id}.png'
+                        if source_job and existing.is_file():
+                            import cv2
+                            if cv2.imread(str(existing)) is not None: return existing
+                        files={}
+                        if spec.get('kind')=='shot_keyframe':
+                            bindings=spec.get('asset_bindings') or {}
+                            ids=bindings.get('character_ids') or spec.get('reference_asset_ids') or []
+                            provider=self.server.providers.get(fields['provider_id']) or {}
+                            limit=2 if provider.get('provider')=='mock_doubao' else 1
+                            references=[(str(key),ctx.artifacts.get('assets',{}).get(str(key))) for key in ids]
+                            references=[(key,path) for key,path in references if isinstance(path,Path) and path.is_file()]
+                            if len(references)>limit: raise ValueError(f'关键帧有 {len(references)} 个角色参考，超过当前 Provider 的 {limit} 张限制')
+                            for index,(key,path) in enumerate(references,1):
+                                files['reference_image' if index==1 else f'reference_image_{index}']=path
+                            specs={str(item.get('id')):item for item in ctx.artifacts['continuity_bible'].get('assets',[])}
+                            descriptions=[specs[key] for key in spec.get('reference_asset_ids',[]) if key in specs]
+                            fields['prompt']='按参考图顺序锁定对应角色的脸、服装和体型。只出现本镜头指定角色，真实电影摄影，无字幕。参考图对应资产：'+json.dumps([key for key,_ in references],ensure_ascii=False)+'。本镜头素材设定：'+json.dumps(descriptions,ensure_ascii=False)+'。镜头首帧：'+fields['prompt']
+                            fields['reference_asset_ids']=json.dumps([key for key,_ in references],ensure_ascii=False)
+                        return invoke("image",fields,files,task/f"asset_{asset_id}.png")
                     def keyframes(clip,shot,ctx): return extract_boundary_frames(clip,task/"keyframes"/str(shot["id"]))
                     def persist_assets(assets,bible,ctx):
                         specs={str(item.get("id")):item for item in bible.get("assets",[]) if isinstance(item,dict) and item.get("id")}
@@ -644,6 +688,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.server.jobs.update(job,status="running",message="正在连接生成服务",progress=5)
                     provider_id = params["provider_id"] or "local"
                     provider_config=self.server.providers.get(provider_id) if provider_id not in {'local','mock_doubao'} else self.server.providers.get_by_provider('mock_doubao') if provider_id=='mock_doubao' else None
+                    if (provider_config or {}).get('provider') in {'stock_pixabay','stock_pexels'}:
+                        raise ProviderError('图库配置仅用于发布配图检索，不能作为生图或生视频 Provider')
                     if provider_config and provider_config.get('provider')=='mock_doubao':
                         if provider_config.get('enabled') is False:raise ProviderError('豆包 mock Provider 已停用')
                         params['model']=params.get('model') or provider_config.get('default_video_model' if kind=='video' else 'model') or ('mock_doubao_seedance_2_0_mini' if kind=='video' else MOCK_DOUBAO_MODEL)

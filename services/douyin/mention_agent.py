@@ -1,11 +1,19 @@
 """Bounded intent planner and MCP tool orchestration for queued mentions."""
 import asyncio
 import json
+import os
 import re
 import shutil
 import sys
 import time
 from datetime import timedelta
+from services.core.storage import store_root
+
+
+def mcp_environment():
+    # MCP's default inherited environment excludes application-specific variables.
+    return {'DOUYIN_STORE_DIR': str(store_root()),
+            **{key: os.environ[key] for key in ('DOUYIN_ASR_MODEL_DIR', 'PYTHONPYCACHEPREFIX') if key in os.environ}}
 
 
 def classify_intent(provider, text):
@@ -108,7 +116,8 @@ class MentionAgent:
                     params = StdioServerParameters(command=sys.executable, args=[
                         '-m', 'services.douyin.mention_mcp', '--kind', kind,
                         '--task-dir', str(root.resolve()), '--config-path', str(self.config_path),
-                        '--profile', str(self.profile)], cwd=str(__import__('pathlib').Path(__file__).resolve().parents[2]))
+                        '--profile', str(self.profile)], cwd=str(__import__('pathlib').Path(__file__).resolve().parents[2]),
+                        env=mcp_environment())
                     async def notification(done, total, message):
                         if message:
                             progress(message)

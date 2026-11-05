@@ -173,6 +173,7 @@ def start_services(args: argparse.Namespace) -> list[subprocess.Popen[bytes]]:
     service_host = args.service_host
     os.environ['DOUYIN_SERVICE_URL'] = f'http://127.0.0.1:{args.douyin_port}'
     commands = [
+        [sys.executable, str(ROOT / "services" / "youtube" / "service.py"), "--host", service_host, "--port", "8104", "--store-dir", str(persistent_dir / "youtube")],
         [sys.executable, str(ROOT / "services" / "douyin" / "service.py"), "--web", "--web-host", service_host, "--web-port", str(args.douyin_port), "--cache-dir", str(cache_dir / "douyin"), "--store-dir", str(persistent_dir / "douyin")],
         [sys.executable, str(ROOT / "services" / "video_creator" / "service.py"), "--host", service_host, "--port", str(args.video_port), "--cache-dir", str(cache_dir / "video_creator"), "--store-dir", str(persistent_dir / "video_creator")],
         [sys.executable, str(ROOT / "services" / "admin" / "service.py"), "--host", service_host, "--port", "8103", "--cache-dir", str(cache_dir / "video_creator"), "--store-dir", str(persistent_dir / "video_creator")],

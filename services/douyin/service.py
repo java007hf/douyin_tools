@@ -407,6 +407,7 @@ WEB_HTML = r"""<!doctype html>
         <div class="checks"><label><input id="headfulUnderstand" type="checkbox"> 显示浏览器（登录或验证码时使用）</label></div>
         <button id="understandBtn" class="primary">理解并总结视频</button>
         <button id="understandHistoryBtn" class="ghost" type="button">理解历史</button>
+        <div id="understandQueue" class="status" role="status"></div>
         <div id="understandHistory" hidden></div>
         <div id="understandStatus" class="status" role="status" aria-live="polite"></div>
       </div>
@@ -423,6 +424,7 @@ WEB_HTML = r"""<!doctype html>
       <div id="previewBody" class="modal-body"></div>
     </div>
   </div>
+  <script src="/assets/publishing.js"></script>
   <script>
     const $ = (id) => document.getElementById(id);
     function selectTool(tool) {
@@ -662,9 +664,10 @@ WEB_HTML = r"""<!doctype html>
             const labels = {pending:'排队中',running:'进行中',sending:'发送中',done:'已回复',draft:'草稿',error:'失败',cancelled:'已取消'};
             if (item.record_source !== 'mention') labels.done = '已完成';
             button.textContent += ` · ${labels[item.reply_status] || item.reply_status}` + (item.progress ? ` · ${item.progress}` : '') + (item.reply_error ? ` · ${item.reply_error}` : '');
-            if (item.queue_position) button.textContent += ` · 排队第 ${item.queue_position} 位`;
+            if (item.queue_position && !(item.progress || "").includes("排队第")) button.textContent += ` · 排队第 ${item.queue_position} 位`;
           }
           row.appendChild(button);
+          PublicationUI.decorate(row, item, () => loadUnderstandingHistory());
           const remove = document.createElement("button");
           remove.type = "button";
           remove.className = "ghost";
@@ -703,6 +706,17 @@ WEB_HTML = r"""<!doctype html>
       } catch (error) { setStatus("understandStatus", error.message, true); }
       finally { historyLoading = false; }
     }
+    async function refreshSharedUnderstandingQueue() {
+      if ($('pageUnderstand').hidden) return;
+      try {
+        const response = await fetch(mediaHref('/api/understanding-queue'), {cache:'no-store'});
+        const state = await response.json();
+        if (!response.ok) throw new Error(state.error || '队列加载失败');
+        $('understandQueue').textContent = `共享理解队列（抖音 / YouTube） · 等待 ${state.pending} 条 · 处理中 ${state.active} 条 · 并发 ${state.concurrency}`;
+      } catch (error) {$('understandQueue').textContent = '共享队列状态暂不可用：' + error.message;}
+    }
+    setInterval(refreshSharedUnderstandingQueue, 3000);
+    refreshSharedUnderstandingQueue();
     $("understandHistoryBtn").onclick = () => loadUnderstandingHistory();
     setInterval(() => { if (!$('pageUnderstand').hidden && !$('understandHistory').hidden) loadUnderstandingHistory(); }, 5000);
     async function waitUnderstanding(jobId) {
@@ -1024,9 +1038,11 @@ body{margin:0;padding:24px;font-family:"Microsoft YaHei","Segoe UI",sans-serif}m
 .summary-text{max-width:80ch!important}@media(max-width:600px){body{padding:12px}.understanding-result{padding:16px}.detail-status{margin-left:0;width:100%}}
 </style></head><body><main class="detail-page">
 <nav class="detail-toolbar" aria-label="详情导航"><a id="backLink">← 返回视频理解</a>
+<button id="publicationButton" type="button" disabled>发布</button>
 <span id="detailStatus" class="detail-status" role="status" aria-live="polite">正在加载记录…</span></nav>
 <article id="understandResult" class="understanding-result" hidden></article>
-</main><script>
+<section class="publication-content"><h2>平台内容</h2><div id="publicationContents"></div></section>
+</main><script src="/assets/publishing.js"></script><script>
 const $ = id => document.getElementById(id);
 const prefix = location.pathname.match(/^\/tabs\/[^/]+/);
 function mediaHref(href){if(prefix && (href === prefix[0] || href.startsWith(prefix[0] + '/')))return href;return (prefix ? prefix[0] : '') + href;}
@@ -1034,7 +1050,9 @@ $('backLink').href = mediaHref('/?view=understand');
 ''' + 'function timeLabel(seconds)' + renderer + r'''
 const id = location.pathname.split('/').filter(Boolean).pop();
 let rendered = '';
+let publicationSnapshot = '', detailTimer;
 async function refreshDetail(){
+  clearTimeout(detailTimer);
   let again = true;
   try{
     const response = await fetch(mediaHref('/api/understanding-history/' + encodeURIComponent(id)), {cache:'no-store'});
@@ -1047,6 +1065,11 @@ async function refreshDetail(){
     $('detailStatus').textContent = [labels[status] || status, result.progress, result.reply_error].filter(Boolean).join(' · ');
     // Keep video playback, expanded sections and reading position during reply-status updates.
     const content = {...result};
+    delete content.publications;
+    const publicationState = JSON.stringify(result.publications || []);
+    if(publicationState !== publicationSnapshot){PublicationUI.render($('publicationContents'),result.publications || []);publicationSnapshot = publicationState;}
+    $('publicationButton').disabled = result.analysis_ready === false || !result.summary;
+    $('publicationButton').onclick = () => PublicationUI.open({id,title:result.title},refreshDetail);
     if(result.analysis_ready !== false){delete content.progress;delete content.reply_status;delete content.reply_text;delete content.reply_error;}
     const snapshot = JSON.stringify(content);
     if(snapshot !== rendered){renderUnderstanding(result);rendered = snapshot;}
@@ -1055,9 +1078,9 @@ async function refreshDetail(){
       document.querySelector('.reply-text').textContent = result.reply_text ? '回复正文：' + result.reply_text : '';
       document.querySelector('.reply-error').textContent = result.reply_error ? '回复错误：' + result.reply_error : '';
     }
-    again = ['pending','running','sending'].includes(status);
+    again = ['pending','running','sending'].includes(status) || PublicationUI.active(result.publications);
   }catch(error){$('detailStatus').textContent = error.message;}
-  if(again) setTimeout(refreshDetail,5000);
+  if(again) detailTimer = setTimeout(refreshDetail,5000);
 }
 refreshDetail();
 </script></body></html>'''
@@ -1265,7 +1288,11 @@ def run_web_server(host: str, port: int, cache_dir: Path, store_dir: Path | None
     seed_browser_profile(legacy_user_data_dir, download_user_data_dir)
     jobs = WebJobStore(persistent_dir / "web_jobs")
     from services.douyin.understanding_history import UnderstandingHistory, render_report
+    from services.core.understanding_queue import reserve, shared_slot, annotate, snapshot as shared_snapshot
     history = UnderstandingHistory(persistent_dir / "understanding_history.sqlite3", download_root)
+    from services.douyin.publishing.engine import PublicationEngine
+    publications = PublicationEngine(history)
+    publications.recover()
     history.interrupt_manual_tasks()
     from services.douyin.mention_monitor import MentionMonitor
 
@@ -1306,6 +1333,13 @@ def run_web_server(host: str, port: int, cache_dir: Path, store_dir: Path | None
 
         def do_GET(self) -> None:
             parsed = urlsplit(self.path)
+            if parsed.path == '/api/publications/capabilities':
+                web_json_response(self, 200, publications.capabilities())
+                return
+            if parsed.path == '/assets/publishing.js':
+                path = Path(__file__).with_name('publishing') / 'ui.js'
+                web_text_response(self, 200, path.read_text(encoding='utf-8'), 'text/javascript; charset=utf-8')
+                return
             if parsed.path == '/api/mentions':
                 web_json_response(self, 200, mention_monitor.status())
                 return
@@ -1315,7 +1349,15 @@ def run_web_server(host: str, port: int, cache_dir: Path, store_dir: Path | None
                 except ValueError:
                     web_json_response(self, 400, {"error": "无效的分页参数"})
                     return
-                web_json_response(self, 200, history.list(offset=offset))
+                data = history.list(offset=offset)
+                state = shared_snapshot()
+                for item in data['items']:
+                    annotate(item, item['id'], state)
+                data['queue'] = state
+                web_json_response(self, 200, data)
+                return
+            if parsed.path == '/api/understanding-queue':
+                web_json_response(self, 200, shared_snapshot())
                 return
             if parsed.path.startswith("/api/understanding-history/"):
                 parts = parsed.path.strip("/").split("/")
@@ -1324,6 +1366,7 @@ def run_web_server(host: str, port: int, cache_dir: Path, store_dir: Path | None
                     web_json_response(self, 404, {"error": "历史记录不存在"})
                     return
                 if len(parts) == 3:
+                    annotate(result, parts[2])
                     web_json_response(self, 200, result)
                 else:
                     if result.get('analysis_ready') is False:
@@ -1348,6 +1391,10 @@ def run_web_server(host: str, port: int, cache_dir: Path, store_dir: Path | None
                 if not job:
                     web_json_response(self, 404, {"error": "任务不存在"})
                     return
+                if job.get('task_id') and job['status'] == 'running':
+                    state = annotate({}, job['task_id'])
+                    if state:
+                        job.update(status='pending', message=state['progress'], queue_position=state['queue_position'])
                 web_json_response(self, 200, job)
                 return
 
@@ -1419,7 +1466,12 @@ def run_web_server(host: str, port: int, cache_dir: Path, store_dir: Path | None
         def do_DELETE(self) -> None:
             parts = urlsplit(self.path).path.strip("/").split("/")
             if len(parts) == 3 and parts[:2] == ["api", "understanding-history"]:
-                if history.delete(parts[2]):
+                try:
+                    deleted = history.delete(parts[2])
+                except ValueError as exc:
+                    web_json_response(self, 409, {'error': str(exc)})
+                    return
+                if deleted:
                     web_json_response(self, 200, {"deleted": True})
                 else:
                     web_json_response(self, 404, {"error": "历史记录不存在"})
@@ -1429,6 +1481,33 @@ def run_web_server(host: str, port: int, cache_dir: Path, store_dir: Path | None
         def do_POST(self) -> None:
             try:
                 data = read_json_request(self)
+
+                publication_path = urlsplit(self.path).path
+                if publication_path in ('/api/publications/xiaohongshu/login', '/api/publications/douyin/login'):
+                    from services.douyin.publishing import xiaohongshu, douyin
+                    adapter = douyin if '/douyin/' in publication_path else xiaohongshu
+                    web_json_response(self, 202, adapter.start('login'))
+                    return
+                if publication_path in ('/api/publications/xiaohongshu/status', '/api/publications/douyin/status'):
+                    from services.douyin.publishing import xiaohongshu, douyin
+                    adapter = douyin if '/douyin/' in publication_path else xiaohongshu
+                    web_json_response(self, 200, adapter.status(data.get('job_id')))
+                    return
+                send_match = re.fullmatch(r'/api/understanding-history/([0-9a-f]{32})/publications/([0-9a-f]{32})/(send|preview|verify|relayout)', publication_path)
+                if send_match:
+                    if send_match[3] == 'relayout':
+                        result = publications.relayout(send_match[1], send_match[2], platform=data.get('platform', 'douyin'), request_id=data.get('request_id'))
+                        web_json_response(self, 200, result)
+                        return
+                    result = publications.verify_send(send_match[1],send_match[2],platform=data.get("platform", "xiaohongshu")) if send_match[3]=='verify' else publications.send(send_match[1], send_match[2], preview=send_match[3]=='preview',platform=data.get('platform', 'xiaohongshu'))
+                    web_json_response(self, 202, result)
+                    return
+
+                publication_match = re.fullmatch(r'/api/understanding-history/([0-9a-f]{32})/publications', urlsplit(self.path).path)
+                if publication_match:
+                    result = publications.submit(publication_match[1], data.get('platforms'), data.get('auto_publish', False), data.get('request_id'))
+                    web_json_response(self, 202, result)
+                    return
 
                 if self.path == '/api/mentions/start':
                     mention_config()
@@ -1499,10 +1578,11 @@ def run_web_server(host: str, port: int, cache_dir: Path, store_dir: Path | None
                     headful = json_bool(data, "headful")
                     task_root = download_root / "understanding" / uuid.uuid4().hex
                     history.update_manual(task_root, work_url, 'pending', '等待视频理解队列')
+                    reserve(task_root.name, '抖音')
 
                     def understanding_task(progress):
                         def tracked_progress(message, partial_result=None):
-                            status = 'pending' if message == '等待视频理解队列' else 'running'
+                            status = 'pending' if message == '等待视频理解队列' or message.startswith('等待共享视频理解队列') else 'running'
                             history.update_manual(task_root, work_url, status, message)
                             progress(message, partial_result)
                         def download(url, output_dir, callback):
@@ -1510,7 +1590,8 @@ def run_web_server(host: str, port: int, cache_dir: Path, store_dir: Path | None
                                 user_data_dir=download_user_data_dir, all_media=False,
                                 wait_seconds=1.5, progress_callback=callback, understanding_media=True)
                         try:
-                            result = understand_work(work_url, task_root, download, config, tracked_progress)
+                            with shared_slot(task_root.name, '抖音', tracked_progress):
+                                result = understand_work(work_url, task_root, download, config, tracked_progress)
                             tracked_progress("正在保存完整报告和历史记录")
                             return history.save(task_root, {**result, 'record_source': 'manual', 'reply_status': 'done', 'analysis_ready': True})
                         except Exception as exc:
@@ -1518,6 +1599,7 @@ def run_web_server(host: str, port: int, cache_dir: Path, store_dir: Path | None
                             raise
 
                     job_id = start_web_job(jobs, "正在创建视频理解任务", understanding_task)
+                    jobs.update(job_id, task_id=task_root.name)
                     web_json_response(self, 202, {"jobId": job_id})
                     return
 
@@ -2348,7 +2430,12 @@ def _download_work_media(
                                           'status_code': payload.get('status_code'),
                                           'status_msg': str(payload.get('status_msg') or '')[:300],
                                           'work_ids': list({str(item.get('aweme_id')) for item in iter_dicts(payload) if item.get('aweme_id')})[:20]})
-            media = extract_media_from_payload(payload, work_id)
+            # Reading a response body pumps Playwright events: a nested target
+            # response may already have populated media while this unrelated
+            # response was being read. Never erase those validated candidates.
+            candidates = extract_media_from_payload(payload, work_id)
+            if candidates and not media:
+                media = candidates
 
         def wait_for_target_media():
             # Pump browser response events until the requested work is identified.

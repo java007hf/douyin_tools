@@ -18,6 +18,7 @@ class Tab:
 
 TABS = (
     Tab("douyin", "抖音工具", "拉取、下载和预览抖音素材", "douyin", 8101),
+    Tab("youtube", "YouTube 工具", "单地址下载与视频理解", "youtube", 8104),
     Tab("video-creator", "AI创作工具", "参考视频复刻工作流", "video_creator", 8102),
     Tab("admin", "后台控制", "模型与云端 Provider 配置", "admin", 8103, admin_only=True),
 )

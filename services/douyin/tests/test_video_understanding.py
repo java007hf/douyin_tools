@@ -287,6 +287,38 @@ class UnderstandingTests(unittest.TestCase):
                                     user_data_dir=self.root / 'profile', wait_seconds=0)
             download.assert_not_called()
 
+    def test_nested_response_cannot_erase_target_media(self):
+        playwright = MagicMock()
+        context = playwright.__enter__.return_value.chromium.launch_persistent_context.return_value
+        page = context.new_page.return_value
+        page.url = 'https://www.douyin.com/video/123'
+        handlers = {}
+        page.on.side_effect = lambda name, callback: handlers.update({name: callback})
+        target = MagicMock()
+        unrelated = MagicMock()
+        for response in (target, unrelated):
+            response.url = 'https://www.douyin.com/aweme/v1/web/aweme/detail/'
+            response.headers = {'content-type': 'application/json'}
+            response.status = 200
+        target.json.return_value = {'aweme_detail': {'aweme_id': '123', 'video': {
+            'play_addr': {'url_list': ['https://example.com/target.mp4']}}}}
+
+        def read_unrelated():
+            handlers['response'](target)
+            return {'aweme_detail': {'aweme_id': '999'}}
+
+        unrelated.json.side_effect = read_unrelated
+        page.goto.side_effect = lambda *a, **k: handlers['response'](unrelated)
+        with patch('services.douyin.service.sync_playwright', return_value=playwright), \
+             patch('services.douyin.service.close_popups'), \
+             patch('services.douyin.service.downloaded_file_has_video', return_value=True), \
+             patch('services.douyin.service.mp4_handler_types', return_value={'vide', 'soun'}), \
+             patch('services.douyin.service.download_url', side_effect=lambda c, u, p, r, **kw: p.write_bytes(b'video')) as download:
+            files = download_work_media(page.url, output_dir=self.root / 'media', headless=True,
+                user_data_dir=self.root / 'profile', wait_seconds=0, understanding_media=True)
+        self.assertEqual(len(files), 1)
+        self.assertEqual(download.call_args.args[1], 'https://example.com/target.mp4')
+
     def test_media_extraction_rejects_recommendations_and_missing_work_id(self):
         wrong = {'aweme_id': '999', 'video': {'play_addr': {'url_list': ['https://example.com/wrong.mp4']}}}
         target = {'aweme_id': '123', 'video': {'play_addr': {'url_list': ['https://example.com/target.mp4']}}}
