@@ -9,8 +9,44 @@ import uuid
 from copy import deepcopy
 from urllib.parse import quote
 
-from .content import generate_content
+from .content import generate_content, EDITORIAL_PROMPT_VERSION
 from .images import prepare_images
+
+
+class EditorialTraceProvider:
+    """Record only editorial inputs/outputs, never provider credentials."""
+    def __init__(self, provider, directory):
+        self.provider = provider
+        self.directory = directory / 'editorial_calls'
+        self.directory.mkdir(parents=True, exist_ok=True)
+        self.count = 0
+
+    def complete(self, prompt, **kwargs):
+        self.count += 1
+        path = self.directory / f'{self.count:02d}.json'
+        record = {'prompt': prompt, 'system_prompt': kwargs.get('system_prompt', ''),
+                  'max_tokens': kwargs.get('max_tokens'), 'context_limit': kwargs.get('context_limit'),
+                  'model': getattr(self.provider, 'config', {}).get('model'),
+                  'configured_context_window': getattr(self.provider, 'config', {}).get('context_window'),
+                  'started_at': time.time(), 'status': 'running'}
+        def save():
+            text = json.dumps(record, ensure_ascii=False, indent=2)
+            for key in ('api_key', 'token', 'secret'):
+                secret = getattr(self.provider, 'config', {}).get(key)
+                if secret:
+                    text = text.replace(str(secret), '********')
+            path.write_text(text, encoding='utf-8')
+        save()
+        try:
+            result = self.provider.complete(prompt, **kwargs)
+            record.update(status='done', output=result)
+            return result
+        except Exception as exc:
+            record.update(status='error', error=str(exc))
+            raise
+        finally:
+            record['finished_at'] = time.time()
+            save()
 
 
 class PublicationEngine:
@@ -22,13 +58,16 @@ class PublicationEngine:
 
     @staticmethod
     def capabilities():
-        return {'version': 2, 'douyin': {'music_required': True, 'text_validation': True,
+        from services.douyin.understanding_prompts import SUMMARY_STYLE_VERSION
+        return {'version': 2, 'generation_lock_scope': 'history_platform', 'editorial_prompt_version': EDITORIAL_PROMPT_VERSION,
+                'summary_style_version': SUMMARY_STYLE_VERSION,
+                'douyin': {'music_required': True, 'text_validation': True,
                                          'relayout': True, 'image_aspect': '9:16'}}
 
     @staticmethod
     def default_images():
         from services.video_creator.tools.ai.stock_images import StockFirstImageTool
-        return StockFirstImageTool()
+        return StockFirstImageTool(background_only=True)
 
     def recover(self, client=None):
         """Reconcile this service's local children before marking parents interrupted."""
@@ -188,6 +227,7 @@ class PublicationEngine:
                     self.store.update(batch, platform, status='running', progress=message,
                                       content={'editorial_trace': {'stages': stages}})
                 from services.douyin.video_understanding import UnderstandingProvider
+                traced_provider = EditorialTraceProvider(provider, directory)
                 if isinstance(provider, UnderstandingProvider):
                     from services.core.understanding_queue import shared_slot
                     from .content import PLATFORMS
@@ -196,9 +236,9 @@ class PublicationEngine:
                     with shared_slot(task_id=f'publication:{batch}:{platform}',
                                      platform=PLATFORMS[platform]['name'] + '改写', progress=waiting):
                         waiting('正在使用视频理解LLM改写：' + str(provider.config.get('model', '')))
-                        content = generate_content(provider, snapshot, platform, progress=editorial_progress)
+                        content = generate_content(traced_provider, snapshot, platform, progress=editorial_progress)
                 else:
-                    content = generate_content(provider, snapshot, platform, progress=editorial_progress)
+                    content = generate_content(traced_provider, snapshot, platform, progress=editorial_progress)
                 config = getattr(provider, 'config', {})
                 content['editorial_trace'] = {
                     'provider_config': config.get('provider', ''),
@@ -210,8 +250,12 @@ class PublicationEngine:
                     'started_at': started,
                     'finished_at': time.time(),
                     'pipeline': 'understanding_llm_platform_rewrite',
+                    'editorial_prompt_version': EDITORIAL_PROMPT_VERSION,
                     'stages': stages,
                 }
+                if config.get('editorial_cache_source'):
+                    content['editorial_trace'].update(pipeline='validated_understanding_llm_output_reuse',
+                        cache_source=config['editorial_cache_source'])
                 relative = directory.relative_to(self.history.download_root).as_posix()
                 href = lambda name: '/downloads/' + quote(relative + '/' + name, safe='/')
                 self.store.update(batch, platform, status='running', progress='文案已生成，优先检索图库照片', content=content)

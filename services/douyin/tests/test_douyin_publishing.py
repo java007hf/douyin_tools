@@ -1,12 +1,56 @@
 import tempfile
+import json
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, Mock, MagicMock
 from services.douyin.publishing import douyin
 from services.douyin.publishing.store import PublicationStore
 
 
 class DouyinPublishingTests(unittest.TestCase):
+    def test_pending_identity_verification_blocks_fresh_send_before_browser_or_upload(self):
+        cache = Path(__file__).resolve().parents[3] / 'cache'
+        with tempfile.TemporaryDirectory(dir=cache) as tmp:
+            root = Path(tmp) / 'douyin_publisher'; root.mkdir()
+            (root / 'verification_required.json').write_text('{}', encoding='utf-8')
+            with patch.object(douyin, 'service_store', return_value=Path(tmp)), \
+                 patch.object(douyin, 'has_previous_publish', return_value=False), \
+                 patch('playwright.sync_api.sync_playwright') as browser, \
+                 patch.object(douyin.queue, 'save') as save:
+                douyin.run('blocked', {'action':'publish'}, {'batch':'batch','db':'db'}, None)
+            browser.assert_not_called()
+            self.assertEqual(save.call_args.args[1], 'error')
+            self.assertIn('本人验证尚未完成', save.call_args.kwargs['message'])
+            self.assertFalse(save.call_args.kwargs['submission_uncertain'])
+
+    def test_verification_retry_requires_same_platform_batch_and_database(self):
+        context = MagicMock()
+        context.__enter__.return_value.execute.return_value.fetchall.return_value = [
+            {'input_json':json.dumps({'platform':'douyin','batch':'same','db':'same-db'})}]
+        with patch.object(douyin.queue, 'connect', return_value=context):
+            self.assertTrue(douyin.has_previous_publish('retry', {'batch':'same','db':'same-db'}))
+            self.assertFalse(douyin.has_previous_publish('other', {'batch':'different','db':'same-db'}))
+            self.assertFalse(douyin.has_previous_publish('other', {'batch':'same','db':'different-db'}))
+            self.assertFalse(douyin.has_previous_publish('orphan', {}))
+
+    def test_hidden_sms_prompt_does_not_block_a_completed_verification(self):
+        page = Mock()
+        page.get_by_text.return_value.count.return_value = 1
+        page.get_by_text.return_value.first.is_visible.return_value = False
+        self.assertFalse(douyin.identity_verification_visible(page))
+        page.get_by_text.return_value.first.is_visible.return_value = True
+        self.assertTrue(douyin.identity_verification_visible(page))
+
+    def test_management_lookup_requires_unique_recent_match_and_cleans_listener(self):
+        for matches in ([], ['1234567890123456789'], ['1234567890123456789','2234567890123456789']):
+            page = Mock()
+            response = Mock(url='https://creator.douyin.com/web/api/aweme/post/')
+            response.json.return_value = [{'aweme_id': item, 'desc': '内容标题', 'create_time': 100} for item in matches]
+            page.wait_for_timeout.side_effect = lambda _: page.on.call_args.args[1](response)
+            result = douyin.management_receipt(page, {'title': '内容标题'}, 100)
+            self.assertEqual(bool(result), len(matches) == 1)
+            page.remove_listener.assert_called_once_with('response', page.on.call_args.args[1])
+
     def test_receipt_requires_success_and_real_id(self):
         for value in ({}, {'status_code': 1, 'aweme_id': '1234567890123456789'},
                       {'status_code': 0}, {'status_code': 0, 'aweme_id': 'invalid'},
@@ -40,7 +84,7 @@ class DouyinPublishingTests(unittest.TestCase):
             (root / 'card-01.png').write_bytes(b'image')
             value = {'title': '标题', 'body': '作者的测算', 'theme': 'finance', 'tags': [],
                      'images': [{'href': '/downloads/card-01.png'}]}
-            self.assertIn('金额为原作者测算示例', douyin.prepare(value, root)['body'])
+            self.assertIn('不构成收益保证', douyin.prepare(value, root)['body'])
             self.assertEqual(value['body'], '作者的测算')
 
     def test_web_title_reuses_llm_cover_title_without_truncating(self):

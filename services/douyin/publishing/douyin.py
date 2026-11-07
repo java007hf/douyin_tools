@@ -11,6 +11,22 @@ from . import xiaohongshu as queue
 CREATOR = 'https://creator.douyin.com'
 
 
+def identity_verification_visible(page):
+    prompt = page.get_by_text('接收短信验证码', exact=True)
+    return bool(prompt.count() and prompt.first.is_visible())
+
+
+def has_previous_publish(identifier, payload):
+    """Only an explicit retry may reopen a verification-blocked publication."""
+    if not payload.get('batch') or not payload.get('db'):
+        return False
+    with queue.connect() as db:
+        rows = db.execute("SELECT input_json FROM jobs WHERE action='publish' AND id<>?", (identifier,)).fetchall()
+    return any((value := json.loads(row['input_json'])).get('platform') == 'douyin'
+               and value.get('batch') == payload.get('batch') and value.get('db') == payload.get('db')
+               for row in rows)
+
+
 def start(action, payload=None):
     return queue.start(action, {**(payload or {}), 'platform': 'douyin', 'created_at': time.time()})
 
@@ -76,10 +92,12 @@ def upload_in_progress(text):
 
 
 def prepare(content, directory):
+    from .content import validate_publication_voice
+    validate_publication_voice(content)
     title = publication_title(content)
     body = content.get('body', '').strip()
     if content.get('theme') == 'finance':
-        body += '\n\n根据来源内容观点整理，金额为原作者测算示例。'
+        body += '\n\n观点与测算应结合适用条件理解，不构成收益保证。'
     tags = content.get('tags', [])
     if not isinstance(tags, list) or any(not isinstance(t, str) for t in tags):
         raise ValueError('话题格式无效')
@@ -133,9 +151,34 @@ def matching_posts(value, title, created_since=None):
     return found
 
 
+def management_receipt(page, content, created_since=None):
+    """One bounded lookup after a missing publish response; never resubmit."""
+    found = set()
+    def managed(response):
+        parts = urlsplit(response.url)
+        if parts.hostname != 'creator.douyin.com' or 'aweme' not in parts.path or 'post' not in parts.path:
+            return
+        try:
+            found.update(matching_posts(response.json(), publication_title(content), created_since))
+        except Exception:
+            pass
+    page.on('response', managed)
+    try:
+        page.goto(CREATOR + '/creator-micro/content/manage', wait_until='domcontentloaded')
+        page.wait_for_timeout(8000)
+    finally:
+        page.remove_listener('response', managed)
+    if len(found) != 1:
+        return None
+    item = found.pop()
+    return {'item_id': item, 'url': 'https://www.douyin.com/note/' + item,
+            'verification': 'creator_management_exact_title', 'music_status': 'unknown'}
+
+
 def run(identifier, job, payload, store):
     from playwright.sync_api import sync_playwright
     root = service_store('douyin') / 'douyin_publisher'
+    verification_gate = root / 'verification_required.json'
     folder = root / 'jobs' / identifier
     folder.mkdir(parents=True, exist_ok=True)
     submitted = False
@@ -144,17 +187,19 @@ def run(identifier, job, payload, store):
     stage = 'open_browser'
 
     def update(state, **values):
+        if state == 'done' and job['action'] == 'publish':
+            verification_gate.unlink(missing_ok=True)
         if music_binding is not None:
             values.setdefault('music', music_binding)
         queue.save(identifier, state, **values)
         if store:
             mapped = {'done': 'published', 'preview': 'ready', 'awaiting_login': 'awaiting_login',
-                      'unknown': 'unknown', 'error': 'failed'}.get(state, 'sending')
-            if job['action'] == 'verify' and state == 'error':
-                mapped = 'unknown'
+                      'unknown': 'failed', 'error': 'failed'}.get(state, 'sending')
             store.set_publish(payload['batch'], 'douyin', mapped, {'job_id': identifier, **values})
 
     try:
+        if job['action'] == 'publish' and verification_gate.exists() and not has_previous_publish(identifier, payload):
+            raise ValueError('抖音本人验证尚未完成，自动发送已暂缓，素材已保留；方便验证时点击重新发送')
         with sync_playwright() as pw:
             context = pw.chromium.launch_persistent_context(str(root / 'browser'), channel='chrome',
                         headless=False, service_workers='block', viewport={'width': 1280, 'height': 900})
@@ -169,7 +214,10 @@ def run(identifier, job, payload, store):
                         raise ValueError('登录窗口已关闭')
                     if time.monotonic() > deadline:
                         raise ValueError('等待登录或图文入口超时，请检查账号权限与页面')
-                    update('awaiting_login', message='请在Chrome窗口登录抖音；验证码需手动处理，完成后继续')
+                    if queue.login_prompt_visible(page):
+                        update('awaiting_login', message='请在Chrome窗口登录抖音；验证码需手动处理，完成后继续')
+                    else:
+                        update('running', message='正在加载抖音创作者页面与图文入口')
                     page.wait_for_timeout(3000)
                 if job['action'] == 'login':
                     update('connected', message='抖音登录态已保存，之后可直接发布')
@@ -177,31 +225,17 @@ def run(identifier, job, payload, store):
                     return
                 if job['action'] == 'verify':
                     stage = 'verify_management'
-                    found = set()
                     created_since = None
                     with queue.connect() as db:
                         original = db.execute('SELECT input_json FROM jobs WHERE id=?', (payload.get('original_job_id'),)).fetchone()
                     if original:
                         created_since = json.loads(original['input_json']).get('created_at')
-                    def managed(response):
-                        parts = urlsplit(response.url)
-                        if parts.hostname != 'creator.douyin.com' or 'aweme' not in parts.path or 'post' not in parts.path:
-                            return
-                        try:
-                            found.update(matching_posts(response.json(), publication_title(payload['content']), created_since))
-                        except Exception:
-                            pass
-                    page.on('response', managed)
-                    page.goto(CREATOR + '/creator-micro/content/manage', wait_until='domcontentloaded')
-                    page.wait_for_timeout(8000)
-                    if len(found) == 1:
-                        item = found.pop()
-                        result = {'item_id': item, 'url': 'https://www.douyin.com/note/' + item,
-                                  'verification': 'creator_management_exact_title', 'music_status': 'unknown'}
+                    result = management_receipt(page, payload['content'], created_since)
+                    if result:
                         (folder / 'receipt.json').write_text(json.dumps(result, ensure_ascii=False), encoding='utf-8')
                         update('done', message='已核对创作者中心作品记录', receipt=result)
                     else:
-                        update('unknown', message='未取得唯一匹配记录，请手动核对；未重复发送')
+                        update('error', message='发布失败：未取得唯一匹配作品记录，可重新发送', submission_uncertain=True)
                     return
                 media = prepare(payload['content'], payload['directory'])
                 stage = 'upload'
@@ -253,6 +287,11 @@ def run(identifier, job, payload, store):
                 music_binding = select_music(page, payload['content'], folder,
                     lambda message: update('running', message=message))
                 page.screenshot(path=str(folder / 'preview.png'), full_page=True)
+                stage = 'review_preview'
+                from .preview_review import capture_preview, review_preview
+                native_preview = capture_preview(page, folder)
+                review_preview(native_preview, media['files'], folder, task_id=identifier,
+                    progress=lambda message: update('running', message=message))
                 if job['action'] == 'preview':
                     update('preview', message='图文与真实曲库配乐已准备，未提交发布；窗口保留10分钟')
                     page.wait_for_timeout(600000)
@@ -290,21 +329,40 @@ def run(identifier, job, payload, store):
                 button.wait_for(state='visible')
                 if not button.is_enabled():
                     raise ValueError('发布按钮不可用，请核对图片与表单')
+                # Vision review may wait in the shared model queue. Re-read the
+                # form rather than trusting the values captured before that wait.
+                if title.first.input_value()!=media['title'] or normalized_editor_text(editor.inner_text())!=normalized_editor_text(media['body']):
+                    raise ValueError('预览检查期间表单已变化，未提交，请重新预览')
+                if uploads['pending'] or uploads['failed']:
+                    raise ValueError('预览后图片上传状态异常，未提交')
                 stage = 'submit'
                 update('submitting', message='正在提交抖音图文，禁止重复发送')
                 button.click()
                 stage = 'await_receipt'
                 deadline = time.monotonic() + 60
                 result = None
+                verification_deadline = None
                 while time.monotonic() < deadline:
                     if binding_check['blocked']:
                         raise ValueError(binding_check['blocked'])
                     result = next((r['receipt'] for r in responses if r['receipt']), None)
                     if result:
                         break
+                    if identity_verification_visible(page):
+                        if verification_deadline is None:
+                            verification_deadline = time.monotonic() + 600
+                            deadline = verification_deadline
+                            verification_gate.write_text(json.dumps({'job_id': identifier, 'at': time.time(),
+                                'reason': '平台要求本人短信验证，未完成前暂缓新的自动发送'}, ensure_ascii=False), encoding='utf-8')
+                        update('awaiting_login', stage='identity_verification',
+                               message='抖音要求本人短信验证，请在当前Chrome窗口完成验证；程序不会读取或代填验证码')
+                        page.wait_for_timeout(2000)
+                        continue
                     page.wait_for_timeout(500)
                 (folder / 'responses.json').write_text(json.dumps(responses, ensure_ascii=False, indent=2), encoding='utf-8')
                 if not result:
+                    if verification_deadline is not None and identity_verification_visible(page):
+                        raise ValueError('本人短信验证未完成，已停止发布；完成账号验证后可重新发送')
                     raise ValueError('未取得平台作品ID，请核对发布结果；禁止自动重发')
                 if not submitted or not binding_check['submitted'] or not binding_check.get('text'):
                     raise ValueError('无法核实发布请求配乐参数，请核对结果，禁止自动重发')
@@ -315,6 +373,16 @@ def run(identifier, job, payload, store):
                 (folder / 'receipt.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
                 update('done', message='抖音已返回作品ID，审核和可见性以平台为准', receipt=result)
             except Exception:
+                if submitted and job['action'] == 'publish' and page and not page.is_closed():
+                    try:
+                        update('running', stage='verify_management', message='正在自动核对本次发布结果')
+                        result = management_receipt(page, payload['content'], payload.get('created_at'))
+                        if result:
+                            (folder / 'receipt.json').write_text(json.dumps(result, ensure_ascii=False), encoding='utf-8')
+                            update('done', message='已自动核对作品记录，发布成功', receipt=result)
+                            return
+                    except Exception:
+                        pass
                 if page and not page.is_closed():
                     try:
                         page.screenshot(path=str(folder / 'failure.png'), full_page=True)
@@ -325,5 +393,7 @@ def run(identifier, job, payload, store):
                 context.close()
     except Exception as exc:
         (folder / 'diagnostic.json').write_text(json.dumps({'stage': stage, 'exception': type(exc).__name__}), encoding='utf-8')
-        update('unknown' if submitted else 'error', stage=stage,
-               message=str(exc)[:300] if isinstance(exc, ValueError) else '创作者中心操作失败，请检查登录、上传与页面变化')
+        message = str(exc)[:300] if isinstance(exc, ValueError) else '创作者中心操作失败，请检查登录、上传与页面变化'
+        if submitted:
+            message = '发布失败：未能确认作品记录，可重新发送。原操作信息：' + message
+        update('error', stage=stage, submission_uncertain=submitted, message=message)

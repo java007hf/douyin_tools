@@ -7,6 +7,52 @@
   const publishLabels = {not_connected:'未发送',queued:'排队发布',sending:'正在发送',awaiting_login:'等待账号登录',ready:'已准备预览',published:'内容已发布',failed:'发送失败',unknown:'发送结果待核实'};
   const labels = {pending:'等待生成', running:'正在生成', generated:'内容已生成', error:'生成失败'};
   const active = batches => (batches || []).some(b => ['pending','running'].includes(b.status) || b.targets?.some(t => ['queued','sending','awaiting_login'].includes(t.publish_status)));
+  const platformBusy = (batches, platform) => (batches || []).some(b => b.targets?.some(t =>
+    t.platform === platform && (['pending','running'].includes(t.status) || ['queued','sending','awaiting_login','unknown'].includes(t.publish_status))));
+  const regenerationKey = (historyId, platform) => historyId + ':' + platform;
+  const regenerating = new Set();
+  const regenerationRequests = new Map();
+  const regenerationTimers = new WeakMap();
+
+  async function watchRegeneration(container, historyId) {
+    clearTimeout(regenerationTimers.get(container));
+    if (!container.isConnected) return;
+    try {
+      const latest = await api('/api/understanding-history/' + encodeURIComponent(historyId));
+      render(container, latest.publications);
+      if (active(latest.publications)) {
+        regenerationTimers.set(container, setTimeout(() => watchRegeneration(container, historyId), 3000));
+      }
+    } catch (error) {
+      container.append(el('p', '刷新任务状态失败：' + error.message, 'publication-feedback'));
+      regenerationTimers.set(container, setTimeout(() => watchRegeneration(container, historyId), 5000));
+    }
+  }
+
+  async function regenerate(container, batch, target, autoPublish, message) {
+    const historyId = batch.history_id;
+    const lockKey = regenerationKey(historyId, target.platform);
+    if (regenerating.has(lockKey)) return;
+    regenerating.add(lockKey);
+    const key = historyId + ':' + target.platform + ':' + autoPublish;
+    const requestId = regenerationRequests.get(key) || ('regenerate_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2).padEnd(16, '0'));
+    regenerationRequests.set(key, requestId);
+    try {
+      if (target.platform === 'douyin') await requireDouyinPublisher();
+      message.textContent = '正在创建新版本，使用当前提示词重新改写和配图…';
+      await api('/api/understanding-history/' + encodeURIComponent(historyId) + '/publications', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({platforms:[target.platform], auto_publish:autoPublish, request_id:requestId})
+      });
+      regenerationRequests.delete(key);
+      regenerating.delete(lockKey);
+      await watchRegeneration(container, historyId);
+    } catch (error) {
+      message.textContent = error.message;
+    } finally {
+      regenerating.delete(lockKey);
+    }
+  }
   const el = (tag, text, cls) => {
     const node = document.createElement(tag);
     if (text !== undefined) node.textContent = text;
@@ -125,17 +171,62 @@
   function render(container, batches) {
     container.replaceChildren();
     if (!batches?.length) {container.append(el('p','尚未生成平台内容。','publication-note'));return;}
-    for (const [index, batch] of batches.entries()) {
-      const version = el('details', undefined, 'publication-batch'); version.open = index === 0;
+    batches = batches.map(batch => ({...batch, targets:batch.targets.map(target =>
+      target.platform === 'douyin' && target.publish_status === 'unknown'
+        ? {...target, publish_status:'failed'} : target)}));
+    const overview = el('section', undefined, 'publication-platform-overview');
+    overview.append(el('h3', '各平台最新状态与重新生成'));
+    const busy = active(batches);
+    if (busy) overview.append(el('p', '各平台可独立提交，生成任务会进入共享队列依次处理；同一平台不能重复提交。', 'publication-feedback'));
+    const overviewPlatforms = new Set();
+    for (const batch of batches) {
+      for (const target of batch.targets) {
+        if (overviewPlatforms.has(target.platform)) continue;
+        overviewPlatforms.add(target.platform);
+        const targetBusy = platformBusy(batches, target.platform);
+        const panel = el('section', undefined, 'publication-target');
+        panel.append(el('h4', names[target.platform] + '：' + (labels[target.status] || target.status)));
+        if (target.progress && target.status !== 'generated') panel.append(el('p', target.progress, 'publication-note'));
+        if (['xiaohongshu','douyin'].includes(target.platform) && ['generated','error'].includes(target.status)) {
+          const feedback = el('p', '', 'publication-note');feedback.setAttribute('role','status');
+          for (const autoPublish of [false, true]) {
+            const redo = el('button', autoPublish ? '重新生成并发布到' + names[target.platform] : '重新生成' + names[target.platform] + '内容', 'publication-action');
+            redo.type = 'button';
+            redo.disabled = targetBusy || regenerating.has(regenerationKey(batch.history_id, target.platform));
+            redo.title = targetBusy ? '本平台已有任务，请等待完成或核对结果' : '使用当前LLM与提示词生成新版本，保留原稿' + (autoPublish ? '，校验通过后发布' : '，仅保存草稿');
+            redo.onclick = async () => {
+              redo.disabled = true;
+              await regenerate(container, batch, target, autoPublish, feedback);
+              if (redo.isConnected) redo.disabled = targetBusy || regenerating.has(regenerationKey(batch.history_id, target.platform));
+            };
+            panel.append(redo);
+          }
+          if (targetBusy) panel.append(el('p', '本平台已有任务，完成或核对结果后可重新生成。', 'publication-note'));
+          panel.append(feedback);
+        }
+        overview.append(panel);
+      }
+    }
+    container.append(overview);
+    // A single-platform retry must not hide another platform's latest version
+    // inside an older, collapsed batch.
+    const latestPlatforms = new Set();
+    for (const batch of batches) {
+      const currentPlatforms = new Set(batch.targets.filter(target => !latestPlatforms.has(target.platform)).map(target => target.platform));
+      batch.targets.forEach(target => latestPlatforms.add(target.platform));
+      const version = el('details', undefined, 'publication-batch'); version.open = currentPlatforms.size > 0;
       version.append(el('summary', `${new Date(batch.created_at * 1000).toLocaleString()} · ${batch.auto_publish ? '已请求自动发布' : '手动发布'}`));
       for (const target of batch.targets) {
-        const card = el('details', undefined, 'publication-target'); card.open = index === 0;
-        card.append(el('summary', `${names[target.platform]} · ${labels[target.status] || target.status} · ${['xiaohongshu','douyin'].includes(target.platform) ? publishLabels[target.publish_status] || '未发送' : '发布待接入'}`));
+        const current = currentPlatforms.has(target.platform);
+        const card = el('details', undefined, 'publication-target'); card.open = current;
+        card.append(el('summary', `${names[target.platform]} · ${current ? '当前版本' : '历史版本'} · ${labels[target.status] || target.status} · ${['xiaohongshu','douyin'].includes(target.platform) ? publishLabels[target.publish_status] || '未发送' : '发布待接入'}`));
         if (target.error) card.append(el('p', target.error, 'publication-feedback'));
         if (target.progress && target.status !== 'generated') card.append(el('p', target.progress, 'publication-note'));
         if (['xiaohongshu','douyin'].includes(target.platform)) {
           const controls = el('div', undefined, 'publication-publish-actions');
-          const login = el('button', '登录' + names[target.platform]);login.type='button';
+          const waitingLogin = target.publish_status === 'awaiting_login';
+          const login = el('button', waitingLogin ? '继续登录' + names[target.platform] : '管理' + names[target.platform] + '授权');login.type='button';
+          login.title = '首次使用或登录失效时打开授权窗口；已有有效登录态会自动复用，无需每次登录';
           const message=el('p',target.publication?.message || '', 'publication-note');message.setAttribute('role','status');
           async function action(path, button) {
             button.disabled=true;
@@ -157,11 +248,34 @@
               },3000);
             } catch(error) {message.textContent=error.message;button.disabled=false;}
           }
-          login.onclick=()=>action('/api/publications/'+target.platform+'/login',login);controls.append(login);
+          login.onclick=()=>action('/api/publications/'+target.platform+'/login',login);
+          if (waitingLogin) controls.append(el('span', '等待账号登录', 'publication-note'), login);
+          else {
+            const account = el('details');account.append(el('summary', '账号授权（按需操作）'),
+              el('p', '发布时自动复用已保存的登录态。当前未实时检查有效性；仅首次使用或登录失效时需要授权。', 'publication-note'), login);
+            controls.append(account);
+          }
+          const voiceFailure = /成稿口吻不符/.test(target.publication?.message || target.error || '');
+          if (['generated','error'].includes(target.status)) {
+            for (const autoPublish of [false, true]) {
+              const redo = el('button', autoPublish ? '重新生成并发布到' + names[target.platform] : '重新生成内容', autoPublish && voiceFailure ? 'publication-primary' : '');
+              redo.type = 'button';
+              redo.title = '使用当前视频理解LLM和最新提示词重新生成文案、封面及配图，保留原版本' + (autoPublish ? '；全部校验通过后自动发布' : '；完成后仅保存新草稿');
+              redo.disabled = platformBusy(batches, target.platform) || regenerating.has(regenerationKey(batch.history_id, target.platform));
+              if (platformBusy(batches, target.platform)) redo.title='本平台已有任务，完成或核对结果后可重新生成；其他平台可独立提交';
+              redo.onclick = async () => {
+                redo.disabled = true;
+                await regenerate(container, batch, target, autoPublish, message);
+                if (redo.isConnected) redo.disabled = platformBusy(batches, target.platform) || regenerating.has(regenerationKey(batch.history_id, target.platform));
+              };
+              controls.append(redo);
+            }
+          }
           if (target.status==='generated') {
-            const send=el('button',({queued:'已加入发布队列',published:'已发布',sending:'正在发布…',awaiting_login:'等待登录后发布',unknown:'发布结果待核实'})[target.publish_status] || '一键发布到'+names[target.platform],'publication-primary');send.type='button';
+            const send=el('button',({queued:'已加入发布队列',published:'已发布',sending:'正在发布…',awaiting_login:'等待登录后发布',unknown:'发布结果待核实',failed:'重新发送到'+names[target.platform]})[target.publish_status] || '一键发布到'+names[target.platform],'publication-primary');send.type='button';
             send.title='将本版本的封面、内页图片、标题和正文发布到'+names[target.platform];
-            send.disabled=['published','queued','sending','awaiting_login','unknown'].includes(target.publish_status);
+            send.disabled=voiceFailure || ['published','queued','sending','awaiting_login','unknown'].includes(target.publish_status);
+            if (voiceFailure) send.title='旧稿口吻校验未通过，请使用“重新生成内容”或“重新生成并发布”';
             send.onclick=()=>action('/api/understanding-history/'+encodeURIComponent(batch.history_id)+'/publications/'+batch.id+'/send',send);
             controls.prepend(send);
             if (target.platform === 'douyin') {
@@ -305,10 +419,14 @@
         const next = JSON.stringify(result.publications);
         if (next !== snapshot) {render(results, result.publications);snapshot = next;}
         const busy = active(result.publications);
-        submit.disabled = busy || submitting;
-        platforms.querySelectorAll('input').forEach(input => input.disabled = busy || submitting);
-        auto.disabled = busy || submitting;
-        if (busy) feedback.textContent = '正在后台生成；关闭对话框后仍可在这条历史记录中查看。';
+        platforms.querySelectorAll('input').forEach(input => {
+          const blocked = platformBusy(result.publications, input.value);
+          input.disabled = blocked || submitting;
+          if (blocked) input.checked = false;
+        });
+        submit.disabled = submitting;
+        auto.disabled = submitting;
+        if (busy) feedback.textContent = '已有平台任务正在处理；其他平台仍可选择并提交，生成将依次进入共享队列。';
         else if (submissionError) feedback.textContent = submissionError;
         else if (snapshot !== '[]') feedback.textContent = '内容任务已结束。各平台结果见下方，失败的平台可重新选择生成。';
         onRefresh?.();

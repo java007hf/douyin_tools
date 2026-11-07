@@ -94,6 +94,12 @@ def render_cards(content, platform, directory, illustrations=None):
             render_page(content,index,directory/name,illustrations[index] if illustrations is not None else None,font=font,wrap=wrap)
             files.append(name)
             continue
+        if platform == 'wechat' and illustrations is not None:
+            from .editorial_pages import render_page
+            name=f'card-{index+1:02d}.png'
+            render_page(content,index,directory/name,illustrations[index],platform,font=font,wrap=wrap)
+            files.append(name)
+            continue
         image = Image.new('RGB', (width, height), bg)
         draw = ImageDraw.Draw(image)
         draw.rectangle((60, 56, 110, 62), fill=accent)

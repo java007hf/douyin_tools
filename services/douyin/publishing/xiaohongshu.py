@@ -16,6 +16,14 @@ from services.core.storage import service_store
 CREATOR = 'https://creator.xiaohongshu.com'
 
 
+def login_prompt_visible(page):
+    """Missing editor during SPA loading is not proof that login expired."""
+    if '/login' in urlsplit(page.url).path:
+        return True
+    prompts = page.get_by_text(re.compile('扫码登录|验证码登录|手机号登录|立即登录|登录创作者中心'))
+    return any(prompts.nth(i).is_visible() for i in range(min(prompts.count(), 10)))
+
+
 def publish_control(page):
     """Support both the creator center's custom element and legacy button."""
     widgets = page.locator('xhs-publish-btn:not([is-publish="false"])')
@@ -82,6 +90,9 @@ def status(identifier=None):
         state = row['status']
         if state in ('running', 'awaiting_login', 'submitting') and time.time()-row['updated'] > 20 and not alive(row['pid']):
             state = 'unknown' if state == 'submitting' else 'interrupted'
+            db.execute('UPDATE jobs SET status=?,updated=? WHERE id=?', (state, time.time(), row['id']))
+        if state == 'unknown' and json.loads(row['input_json']).get('platform') == 'douyin':
+            state = 'error'
             db.execute('UPDATE jobs SET status=?,updated=? WHERE id=?', (state, time.time(), row['id']))
         result = {'id': row['id'], 'action': row['action'], **json.loads(row['result_json']), 'status': state}
         if state == 'queued':
@@ -168,6 +179,8 @@ def start(action, payload=None):
 
 def prepare(content, directory):
     """Validate and resolve only generated cards from this target's directory."""
+    from .content import validate_publication_voice
+    validate_publication_voice(content)
     title = content.get('title', '').strip()
     body = content.get('body', '').strip()
     tags = content.get('tags', [])
@@ -276,7 +289,10 @@ def run(identifier):
                     raise ValueError('登录窗口已关闭')
                 if '/login' not in page.url and page.get_by_text('发布笔记', exact=True).count():
                     break
-                update('awaiting_login', message='请在弹出的Chrome窗口登录小红书；登录完成后将继续当前任务')
+                if login_prompt_visible(page):
+                    update('awaiting_login', message='请在弹出的Chrome窗口登录小红书；登录完成后将继续当前任务')
+                else:
+                    update('running', message='正在加载小红书创作页面与发布入口')
                 if time.monotonic() > deadline:
                     raise ValueError('等待登录超时，请重新连接账号')
                 page.wait_for_timeout(3000)
@@ -455,7 +471,11 @@ def worker(identifier):
         run(identifier)
     except Exception:
         current = status(identifier)['status']
-        save(identifier, 'unknown' if current == 'submitting' else 'error', message='发布任务异常结束，请核对任务结果')
+        with connect() as db:
+            row = db.execute('SELECT input_json FROM jobs WHERE id=?', (identifier,)).fetchone()
+        is_douyin = bool(row and json.loads(row['input_json']).get('platform') == 'douyin')
+        save(identifier, 'unknown' if current == 'submitting' and not is_douyin else 'error',
+             message='发布任务异常结束，可重新发送' if is_douyin else '发布任务异常结束，请核对任务结果')
     finally:
         # Release only after run() has closed the browser, even if already done.
         release(identifier)

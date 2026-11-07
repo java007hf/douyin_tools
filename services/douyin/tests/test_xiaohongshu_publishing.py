@@ -10,6 +10,19 @@ from services.douyin.understanding_history import UnderstandingHistory
 
 
 class PublishingTests(unittest.TestCase):
+    def test_loading_editor_and_hidden_login_copy_do_not_mean_login_expired(self):
+        from services.douyin.publishing.xiaohongshu import login_prompt_visible
+        page = MagicMock(url='https://creator.douyin.com/creator-micro/content/upload')
+        page.get_by_text.return_value.count.return_value = 0
+        self.assertFalse(login_prompt_visible(page))
+        page.get_by_text.return_value.count.return_value = 1
+        page.get_by_text.return_value.nth.return_value.is_visible.return_value = False
+        self.assertFalse(login_prompt_visible(page))
+        page.get_by_text.return_value.nth.return_value.is_visible.return_value = True
+        self.assertTrue(login_prompt_visible(page))
+        page.url = 'https://creator.xiaohongshu.com/login'
+        self.assertTrue(login_prompt_visible(page))
+
     def test_reconciliation_requires_exact_title_and_valid_note_id(self):
         data={'data':{'notes':[{'title':'当前笔记','note_id':'a'*24},
             {'title':'当前笔记旧版','note_id':'b'*24}, {'title':'当前笔记','id':'unsafe'}]}}

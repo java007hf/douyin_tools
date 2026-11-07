@@ -17,8 +17,7 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 def content(platform='douyin'):
-    xhs_text=('理解市场变化，需要先区分已经发生的事实和对未来的预期。价格出现波动，只能说明市场的判断正在变化，不能直接证明长期价值已经改变。\n'
-              '判断一个观点是否适用，还要回到它的依据、时间范围和前提条件。原资料没有提供具体行情数据，因此这页只整理分析方法，不据此推断涨跌或保证收益。')
+    xhs_text='市场变化反映预期的变化，不能直接证明长期价值改变。判断观点是否适用，还要回到它的依据、时间范围和前提条件。'
     return {'title': '理解市场波动', 'summary': '市场波动需要结合条件看待。',
             'body': '## 波动与预期\n市场变化反映多重因素，不应据此保证未来收益。',
             'theme': 'finance', 'tags': ['市场观察', '知识整理'],
@@ -81,6 +80,13 @@ class PublishingTests(unittest.TestCase):
         self.assertEqual(trace['provider_config'], 'douyin_understanding')
         self.assertNotIn('secret-not-for-trace', json.dumps(saved))
         self.assertEqual(len(provider.calls), 1)
+        directory = self.history.download_root / 'publications' / self.identifier / batch / 'douyin' / 'editorial_calls'
+        calls = list(directory.glob('*.json'))
+        self.assertEqual(len(calls), 1)
+        recorded = calls[0].read_text(encoding='utf-8')
+        self.assertNotIn('secret-not-for-trace', recorded)
+        self.assertEqual(json.loads(recorded)['output']['body'], saved['body'])
+        self.assertEqual(json.loads(recorded)['status'], 'done')
 
     def test_douyin_shortening_preserves_visuals_and_other_cards(self):
         from services.douyin.publishing.content import shorten_long_cards
@@ -106,6 +112,83 @@ class PublishingTests(unittest.TestCase):
             with patch.object(provider, 'complete', return_value={'pages': pages}):
                 with self.assertRaises(ValueError):
                     shorten_long_cards(provider, value, 'douyin', self.source)
+
+    def test_douyin_overflow_is_repaired_per_page_without_regenerating_whole_post(self):
+        from services.douyin.publishing.content import shorten_long_cards
+        value = content(); value['cards'][1]['text'] = '长正文' * 40
+        provider = Provider()
+        with patch.object(provider, 'complete', side_effect=[
+            {'pages': [{'index': 1, 'text': '仍然太长' * 30}]},
+            {'text': '及时沟通并尊重回复边界，不要把个别经历视为普遍结论。'}]) as call:
+            result = shorten_long_cards(provider, value, 'douyin', self.source)
+        self.assertEqual(call.call_count, 2)
+        self.assertLessEqual(len(result['cards'][1]['text']), 80)
+        self.assertEqual(result['cards'][0], value['cards'][0])
+        self.assertEqual(result['body'], value['body'])
+
+    def test_douyin_prompt_does_not_include_xhs_minimum_length(self):
+        provider = Provider()
+        generate_content(provider, self.source, 'douyin')
+        system = provider.calls[0][1]['system_prompt']
+        self.assertNotIn('每页text至少90字', system)
+        self.assertIn('含标点不得超过80字符', system)
+
+    def test_long_title_reuses_existing_model_headline_without_rewriting_body(self):
+        value=content(); value['title']='这是本地模型生成但超过抖音二十字上限的完整主标题'
+        provider=Provider()
+        with patch.object(provider,'complete',return_value=value) as call:
+            result=generate_content(provider,self.source,'douyin')
+        self.assertEqual(call.call_count,1)
+        self.assertEqual(result['title'],value['cover']['headline'])
+        self.assertEqual(result['body'],value['body'])
+        self.assertEqual(result['cards'][0]['text'],value['cards'][0]['text'])
+        self.assertEqual(value['title'],'这是本地模型生成但超过抖音二十字上限的完整主标题')
+
+    def test_long_card_heading_is_repaired_without_replacing_text_or_images(self):
+        from services.douyin.publishing.content import shorten_card_headings
+        value = content(); value['cards'][2]['heading'] = '这是一个超过卡片标题长度上限但正文和配图都需要保留的标题'
+        provider = Provider()
+        with patch.object(provider, 'complete', return_value={'headings': [{'index': 2, 'heading': '保留适用条件'}]}):
+            result = shorten_card_headings(provider, value, self.source)
+        self.assertEqual(result['cards'][2]['heading'], '保留适用条件')
+        self.assertEqual(result['cards'][2]['text'], value['cards'][2]['text'])
+        self.assertEqual(result['cards'][2]['image_prompt'], value['cards'][2]['image_prompt'])
+        self.assertEqual(result['body'], value['body'])
+
+    def test_xhs_short_copy_is_not_padded(self):
+        from services.douyin.publishing.content import expand_short_cards
+        value=content('xiaohongshu');value['cards'][1]['text']='沟通与产出需要兼顾。'
+        with patch.object(Provider,'complete') as call:
+            result=expand_short_cards(Provider(),value,'xiaohongshu',self.source)
+        call.assert_not_called();self.assertEqual(result,value)
+
+    def test_dense_pages_are_split_with_independent_visuals(self):
+        from services.douyin.publishing.content import split_dense_cards
+        value=content('xiaohongshu');value['cards'][1]['text']='长内容。'*35
+        additions=[{**content('xiaohongshu')['cards'][1],'heading':'先看事实','image_prompt':'桌面报纸'},
+                   {**content('xiaohongshu')['cards'][1],'heading':'再看条件','image_prompt':'办公讨论'}]
+        with patch.object(Provider,'complete',return_value={'groups':[{'index':1,'cards':additions}]}):
+            result=split_dense_cards(Provider(),value,'xiaohongshu',self.source)
+        self.assertEqual(len(result['cards']),5)
+        self.assertEqual(result['cards'][0],value['cards'][0])
+        self.assertEqual(result['cards'][3:],value['cards'][2:])
+        self.assertNotEqual(result['cards'][1]['image_prompt'],result['cards'][2]['image_prompt'])
+        self.assertEqual(len(validate_content(result,'xiaohongshu',self.source)['cards']),5)
+        self.assertEqual(result['body'],value['body'])
+
+    def test_card_count_can_grow_beyond_six_and_each_page_is_illustrated(self):
+        from services.douyin.publishing.images import prepare_images
+        value=content('xiaohongshu')
+        value['cards']+= [{**value['cards'][1],'image_prompt':f'第{i}个独立场景'} for i in range(4)]
+        value=validate_content(value,'xiaohongshu',self.source)
+        calls=[]
+        class Capture(ImageTool):
+            def generate(inner,prompt,target,progress,**kwargs):
+                calls.append((prompt,target.name));return super().generate(prompt,target,progress,**kwargs)
+        names=prepare_images(Capture(),value,'xiaohongshu',self.root,lambda m:None)
+        self.assertEqual(len(names),8)
+        self.assertEqual(len(calls),8)
+        self.assertEqual(len(set(name for _,name in calls)),8)
 
     def test_default_rewrite_uses_understanding_configuration(self):
         from services.douyin.video_understanding import UnderstandingProvider
@@ -152,8 +235,89 @@ class PublishingTests(unittest.TestCase):
         self.assertEqual(''.join(lines),text)
         self.assertTrue(any('600万vs280万' in line for line in lines))
 
+    def test_douyin_critical_text_avoids_phone_overlay_regions(self):
+        from PIL import ImageDraw
+        from services.douyin.publishing.cards import font,wrap
+        from services.douyin.publishing.douyin_layout import render_page,render_cover,spec
+        original=ImageDraw.ImageDraw.text
+        boxes=[]
+        def measured(draw,xy,text,*args,**kwargs):
+            if text and '配图' not in text:
+                boxes.append(draw.textbbox(xy,text,font=kwargs['font'],stroke_width=kwargs.get('stroke_width',0)))
+            return original(draw,xy,text,*args,**kwargs)
+        source=self.root/'safe-photo.png';Image.new('RGB',(1080,1920),'#536373').save(source)
+        content={'cover':{'headline':'大厂跳初创7周被裁','subtitle':'新手保护期是错觉','style':'portrait'},
+                 'cards':[{}, {'heading':'沟通与产出需要兼顾','text':'保持沟通与产出之间的平衡。'*6}]}
+        with patch.object(ImageDraw.ImageDraw,'text',measured):
+            render_cover(content,self.root/'safe-cover.png',source,font=font,wrap=wrap)
+            render_page(content,1,self.root/'safe-page.png',source,font=font,wrap=wrap)
+        self.assertTrue(boxes)
+        for left,top,right,bottom in boxes:
+            self.assertGreaterEqual(top,280)
+            self.assertLessEqual(right,900)
+            self.assertLessEqual(bottom,1360)
+        self.assertEqual(spec()['text_safe_box'],[72,280,820,1080])
+
     def test_style_profiles_are_distinct_and_versioned(self):
         self.assertEqual(len({style_version(p) for p in ('douyin', 'wechat', 'xiaohongshu')}), 3)
+
+    def test_inner_pages_use_full_background_without_a_text_panel(self):
+        from services.douyin.publishing.editorial_pages import render_page,PROFILES
+        from services.douyin.publishing.cards import font,wrap
+        from services.douyin.publishing.images import contextual_terms
+        source=self.root/'inner-photo.png';Image.new('RGB',(1440,1080),'#397986').save(source)
+        for platform in ('douyin','xiaohongshu','wechat'):
+            value=content(platform);target=self.root/f'{platform}-inner.png'
+            render_page(value,1,target,source,platform,font=font,wrap=wrap)
+            self.assertIsNone(PROFILES[platform][2])
+            with Image.open(target) as image:
+                self.assertEqual(image.size,PROFILES[platform][0])
+                self.assertEqual(image.getpixel((1,1)),image.getpixel((1,image.height-1)))
+                self.assertNotEqual(image.getpixel((1,1)),(242,245,247))
+            self.assertFalse(value['page_rendering']['2']['separate_text_panel'])
+        self.assertEqual(contextual_terms(['elegant adult Asian woman','woman reading book']),['woman reading book'])
+
+    def test_douyin_background_extends_to_bottom_and_copy_stays_safe(self):
+        from services.douyin.publishing.editorial_pages import render_page
+        from services.douyin.publishing.cards import font,wrap
+        source=self.root/'continuous-photo.png';Image.new('RGB',(1080,1920),'#12ab67').save(source)
+        value=content();target=self.root/'continuous-page.png'
+        render_page(value,1,target,source,'douyin',font=font,wrap=wrap)
+        spec=value['page_rendering']['2']
+        self.assertEqual(spec['photo_box'],[0,0,1080,1920])
+        self.assertLessEqual(spec['text_box'][1]+spec['text_box'][3],1360)
+        with Image.open(target) as image:
+            self.assertEqual(image.getpixel((1,10)),image.getpixel((1,1910)))
+
+    def test_large_type_keeps_visible_background_and_adapts_text_contrast(self):
+        from services.douyin.publishing.editorial_pages import render_page
+        from services.douyin.publishing.cards import font,wrap
+        for color,mode in (('black','light_text'),('white','dark_text')):
+            source=self.root/f'{color}-background.png';Image.new('RGB',(1080,1920),color).save(source)
+            value=content();target=self.root/f'{color}-large.png'
+            render_page(value,1,target,source,'douyin',font=font,wrap=wrap)
+            record=value['page_rendering']['2']
+            self.assertGreaterEqual(record['body_font_size'],64)
+            self.assertGreaterEqual(record['title_font_size'],84)
+            self.assertLess(record['wash_opacity'],.4)
+            self.assertEqual(record['contrast_mode'],'fixed_palette')
+            self.assertEqual(record['text_style'],'solid_bold_high_contrast')
+            self.assertTrue(set(record['body_colors'])== {'#ffe600'})
+            self.assertTrue(set(record['title_colors'])== {'#c90013'})
+            self.assertNotIn('#fffdf5',record['body_colors'])
+            self.assertLessEqual(record['text_box'][1]+record['text_box'][3],1340)
+
+    def test_yellow_scheme_stays_identical_on_all_backgrounds_and_pages(self):
+        from services.douyin.publishing.editorial_pages import render_page
+        from services.douyin.publishing.cards import font,wrap
+        value=content();value['inner_color_scheme']='yellow'
+        for index,color in ((1,'black'),(2,'white')):
+            photo=self.root/f'unified-{index}.png';Image.new('RGB',(1080,1920),color).save(photo)
+            render_page(value,index,self.root/f'yellow-{index}.png',photo,'douyin',font=font,wrap=wrap)
+            record=value['page_rendering'][str(index+1)]
+            self.assertEqual(set(record['title_colors']),{'#ffe600'})
+            self.assertEqual(set(record['body_colors']),{'#ffe600'})
+        self.assertEqual(value['inner_color_scheme'],'yellow')
 
     def test_source_only_contains_editorial_evidence(self):
         provider = Provider()
@@ -186,6 +350,34 @@ class PublishingTests(unittest.TestCase):
             value=content();value['cover'].update(update)
             with self.subTest(update=update),self.assertRaises(ValueError):validate_content(value,'douyin',self.source)
 
+    def test_visual_plan_is_validated_and_reaches_photo_prompt_and_keyword_renderer(self):
+        from services.douyin.publishing.images import prepare_images
+        from services.douyin.publishing.cover_design import planned_lines
+        from services.douyin.publishing.cards import font,wrap
+        from PIL import ImageDraw
+        value=content();value['cover'].update(visual_type='trend',visual_focus='桌面报纸和阅读动作',
+                                             palette='teal',emphasis_words=['涨跌'])
+        value=validate_content(value,'douyin',self.source)
+        calls=[]
+        class Capture(ImageTool):
+            def generate(inner,prompt,target,progress,**kwargs):
+                calls.append(prompt);return super().generate(prompt,target,progress,**kwargs)
+        draw_original=ImageDraw.ImageDraw.text;paint=[]
+        def painted(draw,xy,text,*args,**kwargs):
+            paint.append((text,kwargs.get('fill')));return draw_original(draw,xy,text,*args,**kwargs)
+        with patch.object(ImageDraw.ImageDraw,'text',painted):
+            prepare_images(Capture(),value,'douyin',self.root,lambda m:None)
+        self.assertIn('金融市场下跌',calls[0])
+        self.assertIn('低饱和青绿',calls[0])
+        self.assertIn(('涨跌','#60e8d0'),paint)
+        self.assertEqual(value['render_validation']['actual_files'][0]['height'],1920)
+        draw=ImageDraw.Draw(Image.new('RGB',(500,500)))
+        lines=planned_lines(draw,'看清市场波动之后',font(40),200,['市场波动'],wrap)
+        self.assertTrue(any('市场波动' in line for line in lines))
+        for update in ({'emphasis_words':['保证赚钱']},{'palette':'javascript:bad'},{'emphasis_words':['涨跌','涨跌']}):
+            bad=content();bad['cover'].update(update)
+            with self.subTest(update=update),self.assertRaises(ValueError):validate_content(bad,'douyin',self.source)
+
     def test_cover_layouts_render_both_platform_aspects(self):
         from services.douyin.publishing.cards import render_cards
         photo=self.root/'photo.png';Image.new('RGB',(1080,1440),'#ead9bb').save(photo)
@@ -195,39 +387,86 @@ class PublishingTests(unittest.TestCase):
                 render_cards(value,platform,self.root,illustrations=[photo]*len(value['cards']))
                 with Image.open(self.root/'card-01.png') as image:
                     self.assertEqual(image.size,(1280,720) if platform=='wechat' else (1080,1920) if platform=='douyin' else (1080,1440))
-                    if style=='white_red':self.assertEqual(image.getpixel((0,0)),(255,255,255))
+                    self.assertEqual(image.getpixel((0,0)),(234,217,187))
 
-    def test_xhs_rejects_slogan_only_interior_page(self):
-        value=content('xiaohongshu');value['cards'][1]['text']='保持清醒。'
-        with self.assertRaisesRegex(ValueError,'信息过少'):validate_content(value,'xiaohongshu',self.source)
+    def test_adaptive_cover_groups_copy_without_dark_bands(self):
+        from services.douyin.publishing.cover_design import render_cover
+        from services.douyin.publishing.cards import font,wrap
+        photo=self.root/'adaptive-photo.png';Image.new('RGB',(1080,1920),'#c9d4cc').save(photo)
+        for style in ('portrait','scene'):
+            value=content();value['cover']['style']=style
+            meta=render_cover(value,'douyin',self.root/f'adaptive-{style}.png',photo,font=font,wrap=wrap)
+            self.assertFalse(meta['dark_bands'])
+            self.assertEqual(meta['placement'],'above_subject' if style=='portrait' else 'centered_group')
+            self.assertLess(meta['support_box'][1]-(meta['headline_box'][1]+meta['headline_box'][3]),40)
+            with Image.open(self.root/f'adaptive-{style}.png') as im:
+                self.assertEqual(im.getpixel((0,0)),(201,212,204))
+                self.assertEqual(im.getpixel((0,1800)),(201,212,204))
 
-    def test_short_pages_are_expanded_without_changing_other_content(self):
-        value = content('xiaohongshu')
-        expanded_text = value['cards'][1]['text']
-        value['cards'][1]['text'] = '理解市场变化。'
-        value['cards'][3]['text'] = '留意条件。'
-        provider = Provider()
-        with patch.object(provider, 'complete', side_effect=[value, {'pages': [
-                {'index': 1, 'text': expanded_text}, {'index': 3, 'text': expanded_text}]}]) as complete:
-            result = generate_content(provider, self.source, 'xiaohongshu')
-        self.assertEqual(complete.call_count, 2)
-        self.assertEqual(result['cards'][1]['text'], expanded_text)
-        self.assertEqual(result['cards'][3]['text'], expanded_text)
-        self.assertEqual(result['cover'], value['cover'])
-        self.assertEqual(value['cards'][1]['text'], '理解市场变化。')
-        payload = json.loads(complete.call_args.args[0])
-        self.assertEqual([p['index'] for p in payload['pages']], [1, 3])
+    def test_finance_background_overrides_generic_scenery_and_portraits(self):
+        from services.douyin.publishing.elegant_backgrounds import direction
+        for category in ('landscape','portrait','lifestyle','reading'):
+            card={'heading':'股价为何下跌','background_kind':category}
+            kind,description,terms=direction(card,0,{'style':'scene'},theme='finance',title='美光财报')
+            self.assertEqual(kind,'finance')
+            self.assertIn('下跌',description)
+            self.assertTrue(all('stock' in term or 'forex' in term for term in terms))
+        kind,_,_=direction({'heading':'供给压力隐忧'},5,theme='finance')
+        self.assertEqual(kind,'semiconductor')
 
-    def test_expansion_rejects_missing_duplicate_or_short_pages(self):
-        from services.douyin.publishing.content import expand_short_cards
-        value = content('xiaohongshu')
-        text = value['cards'][1]['text']
-        value['cards'][1]['text'] = value['cards'][2]['text'] = '太短'
-        for pages in ([], [{'index': 1, 'text': text}]*2,
-                      [{'index': 1, 'text': text}, {'index': 2, 'text': '仍短'}]):
-            with self.subTest(pages=pages), patch.object(Provider, 'complete', return_value={'pages': pages}):
-                with self.assertRaisesRegex(ValueError, 'AI扩写'):
-                    expand_short_cards(Provider(), value, 'xiaohongshu', self.source)
+    def test_cover_contract_reaches_editorial_image_and_renderer_on_all_platforms(self):
+        from services.douyin.publishing.cover_design import EDITORIAL_RULES,ZONES,render_cover
+        from services.douyin.publishing.images import prepare_images
+        from services.douyin.publishing.cards import font,wrap
+        from PIL import ImageDraw
+        for platform in ('douyin','xiaohongshu','wechat'):
+            with self.subTest(platform=platform):
+                provider=Provider();value=generate_content(provider,self.source,platform)
+                self.assertIn(EDITORIAL_RULES,provider.calls[0][1]['system_prompt'])
+                calls=[]
+                class Capture(ImageTool):
+                    def generate(inner,prompt,target,progress,**kwargs):
+                        calls.append((prompt,kwargs))
+                        return super().generate(prompt,target,progress,**kwargs)
+                prepare_images(Capture(),value,platform,self.root,lambda message:None)
+                self.assertIn('高雅自然摄影背景',calls[0][0])
+                self.assertNotIn('主体偏右、左侧',calls[0][0])
+                self.assertEqual(calls[0][1]['aspect'],{'douyin':'9:16','xiaohongshu':'3:4','wechat':'16:9'}[platform])
+                original=ImageDraw.ImageDraw.text;boxes=[]
+                def measured(draw,xy,text,*args,**kwargs):
+                    boxes.append(draw.textbbox(xy,text,font=kwargs['font'],anchor=kwargs.get('anchor'),stroke_width=kwargs.get('stroke_width',0)))
+                    return original(draw,xy,text,*args,**kwargs)
+                with patch.object(ImageDraw.ImageDraw,'text',measured):
+                    render_cover(value,platform,self.root/'cover-check.png',self.root/'illustration-01.png',font=font,wrap=wrap)
+                size=ZONES[platform][0]
+                top=value['cover']['composition']['headline_box'];bottom=value['cover']['composition']['support_box']
+                self.assertTrue(boxes)
+                for left,y,right,end in boxes:
+                    self.assertTrue(end<=top[1]+top[3] or y>=bottom[1]-5)
+                    self.assertLessEqual(end,bottom[1]+bottom[3]+5)
+                    self.assertGreaterEqual(left,0);self.assertLessEqual(right,size[0])
+                self.assertEqual(value['cover']['composition']['structure'],['headline','subject','support'])
+
+    def test_xhs_rejects_dense_interior_and_accepts_concise_copy(self):
+        value=content('xiaohongshu');value['cards'][1]['text']='适用条件仍须结合资料判断。'
+        validate_content(value,'xiaohongshu',self.source)
+        value['cards'][1]['text']='长'*101
+        with self.assertRaises(ValueError):validate_content(value,'xiaohongshu',self.source)
+
+    def test_short_pages_do_not_trigger_extra_llm_calls(self):
+        value=content('xiaohongshu');value['cards'][1]['text']='留意适用条件。'
+        with patch.object(Provider,'complete',return_value=value) as call:
+            result=generate_content(Provider(),self.source,'xiaohongshu')
+        self.assertEqual(call.call_count,1)
+        self.assertEqual(result['cards'][1]['text'],'留意适用条件。')
+
+    def test_split_rejects_missing_duplicate_or_still_dense_groups(self):
+        from services.douyin.publishing.content import split_dense_cards
+        value=content('xiaohongshu');value['cards'][1]['text']='长'*180
+        for groups in ([],[{'index':1,'cards':[value['cards'][1]]}],
+                       [{'index':1,'cards':[value['cards'][1]]*2}]):
+            with self.subTest(groups=groups),patch.object(Provider,'complete',return_value={'groups':groups}):
+                with self.assertRaises(ValueError):split_dense_cards(Provider(),value,'xiaohongshu',self.source)
 
     def test_missing_cards_are_appended_preserving_existing_cards(self):
         value = content('xiaohongshu')
@@ -243,27 +482,20 @@ class PublishingTests(unittest.TestCase):
         self.assertEqual(len(value['cards']), 2)
         self.assertEqual(json.loads(complete.call_args.args[0])['missing_count'], 2)
 
-    def test_empty_cover_and_oversized_interior_are_repaired(self):
+    def test_empty_copy_is_repaired_without_expanding_other_pages(self):
         from services.douyin.publishing.content import expand_short_cards
-        value = content('xiaohongshu')
-        text = value['cards'][1]['text']
-        value['cards'][0]['text'] = ''
-        value['cards'][1]['text'] = '长' * 300
-        with patch.object(Provider, 'complete', return_value={'pages': [
-                {'index': 0, 'text': text}, {'index': 1, 'text': text}]}):
-            result = expand_short_cards(Provider(), value, 'xiaohongshu', self.source)
-        self.assertEqual(len(validate_content(result, 'xiaohongshu', self.source)['cards']), 4)
-        self.assertEqual(value['cards'][0]['text'], '')
+        value=content('xiaohongshu');value['cards'][0]['text']=''
+        with patch.object(Provider,'complete',return_value={'pages':[{'index':0,'text':'先分清事实，再理解预期。'}]}):
+            result=expand_short_cards(Provider(),value,'xiaohongshu',self.source)
+        self.assertEqual(result['cards'][1:],value['cards'][1:])
+        validate_content(result,'xiaohongshu',self.source)
 
-    def test_new_short_card_is_expanded_before_validation(self):
-        value = content('xiaohongshu')
-        text = value['cards'][-1]['text']
-        addition = {**value['cards'].pop(), 'text': '信息过短'}
-        with patch.object(Provider, 'complete', side_effect=[value, {'cards': [addition]},
-                {'pages': [{'index': 3, 'text': text}]}]) as complete:
-            result = generate_content(Provider(), self.source, 'xiaohongshu')
-        self.assertEqual(complete.call_count, 3)
-        self.assertEqual(result['cards'][3]['text'], text)
+    def test_new_short_card_is_kept_after_supplement(self):
+        value=content('xiaohongshu');addition={**value['cards'].pop(),'text':'判断前先检查适用条件。'}
+        with patch.object(Provider,'complete',side_effect=[value,{'cards':[addition]}]) as call:
+            result=generate_content(Provider(),self.source,'xiaohongshu')
+        self.assertEqual(call.call_count,2)
+        self.assertEqual(result['cards'][3]['text'],addition['text'])
 
     def test_supplement_count_and_platform_limits(self):
         from services.douyin.publishing.content import supplement_cards
@@ -291,14 +523,21 @@ class PublishingTests(unittest.TestCase):
         self.assertEqual(''.join(rows),text)
         self.assertTrue(all(row[0] not in '，。！？：；、）》」』】' for row in rows))
 
-    def test_xhs_photo_is_full_bleed_not_a_bottom_thumbnail(self):
+    def test_xhs_uses_large_photo_above_black_on_white_copy(self):
         from services.douyin.publishing.cards import render_cards
         value=content('xiaohongshu')
         photo=self.root/'photo.png';Image.new('RGB',(1344,768),(30,60,90)).save(photo)
         render_cards(value,'xiaohongshu',self.root,illustrations=[photo]*len(value['cards']))
-        with Image.open(self.root/'card-02.png') as page:
-            self.assertEqual(page.getpixel((0,0)),(30,60,90))
-            self.assertEqual(page.getpixel((1079,600)),(30,60,90))
+        with Image.open(self.root/'card-02.png') as image:
+            self.assertEqual(image.getpixel((0,0)),(30,60,90))
+            self.assertEqual(image.getpixel((0,1439)),(255,255,255))
+        record=value['page_rendering']['2']
+        self.assertEqual(record['background_mode'],'photo_top_white_copy')
+        self.assertEqual(record['title_colors'],['#111111'])
+        self.assertEqual(record['body_colors'],['#333333'])
+        self.assertGreaterEqual(record['photo_box'][3],680)
+        provider=Provider();generate_content(provider,self.source,'xiaohongshu')
+        self.assertIn('上方大图、下方纯白文字区',provider.calls[0][1]['system_prompt'])
 
     def test_schema_repair_is_bounded_to_one_retry(self):
         provider = Provider()
@@ -336,7 +575,38 @@ class PublishingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '请求标识已用于'):
             self.history.publications.create(self.identifier, ['wechat'], False, request)
         with self.assertRaisesRegex(ValueError, '正在生成'):
-            self.create(['wechat'])
+            self.create(['douyin'])
+
+    def test_different_platforms_can_enqueue_independently(self):
+        first = self.create(['douyin'])
+        second = self.create(['xiaohongshu'])
+        self.assertNotEqual(first, second)
+        with self.assertRaisesRegex(ValueError, '所选平台'):
+            self.create(['douyin'])
+        with self.assertRaisesRegex(ValueError, '所选平台'):
+            self.create(['wechat', 'xiaohongshu'])
+        self.assertEqual(len(self.history.publications.list(self.identifier)), 2)
+
+    def test_unknown_publish_result_blocks_same_platform_only(self):
+        first = self.create(['xiaohongshu'])
+        self.history.publications.update(first, 'xiaohongshu', status='generated', content=content('xiaohongshu'))
+        self.history.publications.finish(first)
+        self.history.publications.set_publish(first, 'xiaohongshu', 'unknown', {'message': '需核对'})
+        self.create(['douyin'])
+        with self.assertRaisesRegex(ValueError, '待核实'):
+            self.create(['xiaohongshu'])
+
+    def test_douyin_unknown_becomes_failed_and_can_be_manually_resent(self):
+        batch = self.create(['douyin'])
+        self.history.publications.update(batch, 'douyin', status='generated', content=content())
+        self.history.publications.finish(batch)
+        self.history.publications.set_publish(batch, 'douyin', 'unknown', {'message': '未取得回执'})
+        target = self.history.publications.list(self.identifier)[0]['targets'][0]
+        self.assertEqual(target['publish_status'], 'failed')
+        self.assertTrue(target['publication']['submission_uncertain'])
+        self.history.publications.claim_publish(self.identifier, batch, 'douyin')
+        with self.assertRaises(ValueError):
+            self.history.publications.claim_publish(self.identifier, batch, 'douyin')
 
     def test_concurrent_requests_only_create_one_active_batch(self):
         barrier = threading.Barrier(2)
@@ -440,6 +710,31 @@ class PublishingTests(unittest.TestCase):
         new = self.create()
         self.assertNotEqual(old, new)
         self.assertEqual(len(self.history.get(self.identifier)['publications']), 2)
+
+    def test_regenerate_and_publish_keeps_old_version_and_only_sends_fresh_target(self):
+        engine = PublicationEngine(self.history, provider_factory=Provider, image_factory=ImageTool)
+        old = self.create(['douyin', 'xiaohongshu'])
+        self.history.publications.update(old, 'douyin', status='generated', content=content())
+        self.history.publications.set_publish(old, 'douyin', 'failed', {'message': '成稿口吻不符'})
+        self.history.publications.update(old, 'xiaohongshu', status='generated', content=content('xiaohongshu'))
+        self.history.publications.set_publish(old, 'xiaohongshu', 'published', {'receipt': {'note_id': 'existing-note'}})
+        self.history.publications.finish(old)
+        before = self.history.publications.list(self.identifier)[0]
+        threads = []
+        with patch('services.douyin.publishing.engine.threading.Thread') as thread, patch.object(engine, 'send') as send:
+            thread.side_effect = lambda **kw: threads.append(kw) or type('Deferred', (), {'start': lambda self: None})()
+            request = 'regenerate-idempotent-request-001'
+            fresh = engine.submit(self.identifier, ['douyin'], True, request)
+            again = engine.submit(self.identifier, ['douyin'], True, request)
+            self.assertEqual(fresh['batch_id'], again['batch_id'])
+            self.assertEqual(len(threads), 1)
+            threads[0]['target'](*threads[0]['args'])
+            send.assert_called_once_with(self.identifier, fresh['batch_id'], platform='douyin')
+        versions = {b['id']: b for b in self.history.publications.list(self.identifier)}
+        self.assertEqual(versions[old], before)
+        self.assertNotEqual(fresh['batch_id'], old)
+        self.assertEqual([t['platform'] for t in versions[fresh['batch_id']]['targets']], ['douyin'])
+        self.assertEqual(versions[fresh['batch_id']]['targets'][0]['status'], 'generated')
 
 
 if __name__ == '__main__':

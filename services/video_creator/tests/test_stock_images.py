@@ -11,6 +11,14 @@ from services.video_creator.tools.ai.stock_images import StockFirstImageTool
 
 
 class StockImageTests(unittest.TestCase):
+    def test_financial_and_chip_subjects_reject_literal_keyword_collisions(self):
+        from services.video_creator.tools.ai.stock_images import matches_subject
+        for text in ('brown bear wildlife river','christmas market decorations','farmers market pumpkin'):
+            self.assertFalse(matches_subject(text,'finance'))
+        self.assertFalse(matches_subject('chocolate wafer biscuit snack','semiconductor'))
+        self.assertTrue(matches_subject('forex trading candlestick screen','finance'))
+        self.assertTrue(matches_subject('silicon semiconductor wafer circuit','semiconductor'))
+
     def setUp(self):
         root = Path(__file__).resolve().parents[3] / 'cache'
         self.temp = tempfile.TemporaryDirectory(prefix='stock-test-', dir=root)
@@ -42,6 +50,14 @@ class StockImageTests(unittest.TestCase):
         self.assertEqual(result['provider'],'mock_doubao')
         self.assertIn('图库未配置',result['stock_fallback_reason'])
         self.ai.generate.assert_called_once()
+
+    def test_decorative_backgrounds_skip_bathroom_metadata(self):
+        self.config();self.tool.background_only=True
+        data={'hits':[self.photo(id=1,tags='bathroom room sunlight'),self.photo(id=2,tags='living room sofa sunlight')]}
+        with patch('services.video_creator.tools.ai.stock_images.requests.get',return_value=self.response(data)), \
+             patch('services.video_creator.tools.ai.stock_images.save_image',side_effect=lambda u,p:Image.new('RGB',(1280,720)).save(p)):
+            result=self.tool.generate('elegant living room',self.root/'room.png',search_terms=['room'])
+        self.assertEqual(result['id'],'2')
 
     def test_photo_source_precedes_ai_and_retains_credit(self):
         self.config()
@@ -88,6 +104,12 @@ class StockImageTests(unittest.TestCase):
             result=self.tool.generate('prompt',self.root/'one.png',search_terms=['park'])
         self.assertNotIn('test-private-api-key',json.dumps(result))
         self.assertTrue(result['ai_generated'])
+
+    def test_photo_claim_survives_new_tool(self):
+        self.assertTrue(self.tool.claim_photo('stock_pixabay','shared'))
+        other=StockFirstImageTool(self.root,ai=self.ai)
+        self.assertFalse(other.claim_photo('stock_pixabay','shared'))
+        self.assertTrue(other.claim_photo('stock_pixabay','different'))
 
     def test_nine_sixteen_search_requests_portrait_photos(self):
         config=self.config()

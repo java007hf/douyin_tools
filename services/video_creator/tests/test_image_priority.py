@@ -51,6 +51,21 @@ class ImagePriorityTests(unittest.TestCase):
             self.tool.generate('portrait fallback',self.root/'portrait-fallback.png',aspect='9:16')
         self.assertEqual(local.call_args.kwargs['aspect'],'9:16')
 
+    def test_inner_four_three_ratio_reaches_provider(self):
+        with patch.object(self.tool,'doubao',side_effect=self.output) as cloud:
+            self.tool.generate('inner page',self.root/'inner.png',aspect='4:3')
+        self.assertEqual(cloud.call_args.kwargs['aspect'],'4:3')
+
+    def test_doubao_download_is_cropped_before_publication_and_reports_backup(self):
+        target=self.root/'doubao.png';reports=[]
+        with patch('services.video_creator.tools.ai.doubao_web.DoubaoWebImageProvider') as adapter, \
+             patch('services.video_creator.tools.ai.image_priority.save_image',side_effect=lambda u,p:Image.new('RGB',(400,800),'blue').save(p)):
+            adapter.return_value.generate.return_value=['https://cdn.test/generated.png']
+            self.tool.doubao('background',target,{}, {'web_request':True},lambda **v:reports.append(v))
+        with Image.open(target) as im:self.assertEqual(im.size,(400,760))
+        cleanup=next(r['image_cleanup'] for r in reports if 'image_cleanup' in r)
+        self.assertTrue((self.root/cleanup['original_file']).is_file())
+
     def test_portrait_local_graph_uses_vertical_one_megapixel_latents(self):
         client=MagicMock()
         client.object_info.return_value={'UNETLoader':{'input':{'required':{'unet_name':[['flux1-krea-dev_fp8_scaled.safetensors']]}}}}

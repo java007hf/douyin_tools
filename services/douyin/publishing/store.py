@@ -28,6 +28,7 @@ class PublicationStore:
             columns = {r['name'] for r in db.execute('PRAGMA table_info(publication_targets)')}
             if 'publish_json' not in columns:
                 db.execute("ALTER TABLE publication_targets ADD COLUMN publish_json TEXT NOT NULL DEFAULT '{}'")
+            db.execute("UPDATE publication_targets SET publish_status='failed' WHERE platform='douyin' AND publish_status='unknown'")
 
     @contextmanager
     def connect(self):
@@ -61,8 +62,12 @@ class PublicationStore:
                 if saved_platforms != sorted(platforms) or bool(old['auto_publish']) != auto_publish:
                     raise ValueError('请求标识已用于其他平台或自动发布选项，请重新提交')
                 return old['id'], False
-            if db.execute("SELECT 1 FROM publication_batches WHERE history_id=? AND status IN ('pending','running')", (history_id,)).fetchone():
-                raise ValueError('这条记录的内容正在生成，请等待完成后再提交')
+            marks = ','.join('?' for _ in platforms)
+            if db.execute(f"""SELECT 1 FROM publication_batches b JOIN publication_targets t ON t.batch_id=b.id
+                WHERE b.history_id=? AND t.platform IN ({marks})
+                AND (t.status IN ('pending','running') OR t.publish_status IN ('queued','sending','awaiting_login','unknown'))""",
+                (history_id, *platforms)).fetchone():
+                raise ValueError('所选平台内容正在生成、发送或待核实，请等待完成或先核对发布结果；其他平台可独立提交')
             identifier = uuid.uuid4().hex
             now = time.time()
             db.execute('INSERT INTO publication_batches VALUES (?,?,?,?,?,?,?)',
@@ -86,6 +91,9 @@ class PublicationStore:
             db.execute('UPDATE publication_batches SET status=?,updated_at=? WHERE id=?', (state, time.time(), batch))
 
     def set_publish(self, batch, platform, status, result):
+        if platform == 'douyin' and status == 'unknown':
+            status = 'failed'
+            result = {**result, 'submission_uncertain': True}
         with self.connect() as db:
             db.execute('UPDATE publication_targets SET publish_status=?,publish_json=? WHERE batch_id=? AND platform=?',
                        (status, json.dumps(result, ensure_ascii=False), batch, platform))
@@ -130,7 +138,7 @@ class PublicationStore:
                     if target['publish_status'] in ('queued','sending','awaiting_login') and target['publication'].get('job_id'):
                         from .xiaohongshu import status
                         job = status(target['publication']['job_id'])
-                        mapping = {'queued':'queued','running':'sending','submitting':'sending','done':'published','error':'failed','unknown':'unknown','interrupted':'failed','preview':'ready','awaiting_login':'awaiting_login'}
+                        mapping = {'queued':'queued','running':'sending','submitting':'sending','done':'published','error':'failed','unknown':'failed' if target['platform']=='douyin' else 'unknown','interrupted':'failed','preview':'ready','awaiting_login':'awaiting_login'}
                         target['publish_status'] = mapping.get(job['status'],target['publish_status'])
                         target['publication'] = {'job_id':job.get('id'), **job}
                         db.execute('UPDATE publication_targets SET publish_status=?,publish_json=? WHERE batch_id=? AND platform=?',

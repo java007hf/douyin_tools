@@ -4,15 +4,20 @@ import re
 from PIL import Image, ImageDraw, ImageOps
 
 WIDTH, HEIGHT = 1080, 1920
-LAYOUT_VERSION = 'douyin-portrait-v2'
+LAYOUT_VERSION = 'douyin-integrated-inner-v6'
 BACKGROUND = '#202936'
 INK = '#fffdf5'
-ACCENT = '#ffe4a0'
+ACCENT = '#ffeb58'
 MUTED = '#bcc7d2'
+# Conservative bounds from the supplied phone screenshots: search above,
+# action rail on the right, expanded caption below. These are design bounds,
+# not a claim that every device uses identical native UI geometry.
+SAFE_BOX = (72, 280, 820, 1080)
 
 
 def spec():
-    return {'width': WIDTH, 'height': HEIGHT, 'aspect': '9:16', 'layout_version': LAYOUT_VERSION}
+    return {'width': WIDTH, 'height': HEIGHT, 'aspect': '9:16', 'layout_version': LAYOUT_VERSION,
+            'text_safe_box': list(SAFE_BOX)}
 
 
 def readable_lines(draw, text, face, width):
@@ -32,7 +37,7 @@ def readable_lines(draw, text, face, width):
     return lines
 
 
-def heading(draw, text, box, *, font, wrap, maximum=90, centered=False):
+def heading(draw, text, box, *, font, wrap, maximum=90, centered=False, color=ACCENT, emphasis=False):
     x, y, width, height = box
     for size in range(maximum, 43, -2):
         face = font(size, bold=True)
@@ -44,7 +49,12 @@ def heading(draw, text, box, *, font, wrap, maximum=90, centered=False):
         if len(lines)*step<=height and all(draw.textlength(line,font=face)<=width for line in lines):
             for line in lines:
                 xx=x+(width-draw.textlength(line,font=face))/2 if centered else x
-                draw.text((round(xx),y),line,font=face,fill=ACCENT)
+                # Use the exact supplied title; numeric emphasis never adds a claim.
+                parts=re.split(r'(\d+(?:[.,]\d+)*(?:%|万|亿|倍|年|岁|元)?)',line) if emphasis else [line]
+                for part in parts:
+                    fill='#ff742d' if emphasis and re.match(r'\d',part) else color
+                    draw.text((round(xx),y),part,font=face,fill=fill,stroke_width=3,stroke_fill='#17202a')
+                    xx+=draw.textlength(part,font=face)
                 y+=step
             return y
     raise ValueError('抖音标题超出竖版可读区域，请简化标题')
@@ -59,58 +69,13 @@ def photo(image, source, box, *, centering=(.5,.45)):
 
 
 def render_cover(content, path, illustration, *, font, wrap):
-    image=Image.new('RGB',(WIDTH,HEIGHT),BACKGROUND)
-    full=content['cover'].get('style') in ('portrait','scene')
-    photo(image,illustration,(0,0,WIDTH,HEIGHT) if full else (0,700,WIDTH,HEIGHT-700),centering=(.5,.32))
-    shade=Image.new('RGBA',image.size,(0,0,0,0))
-    overlay=ImageDraw.Draw(shade)
-    if full:
-        for y in range(1000):
-            overlay.line((0,y,WIDTH,y),fill=(20,28,38,round(235*(1-y/1000)**.6)))
-    else:
-        for y in range(700,860):
-            overlay.line((0,y,WIDTH,y),fill=(32,41,54,round(255*(1-(y-700)/160))))
-    image=Image.alpha_composite(image.convert('RGBA'),shade).convert('RGB')
-    draw=ImageDraw.Draw(image)
-    end=heading(draw,content['cover']['headline'],(72,145,WIDTH-144,390),font=font,wrap=wrap,maximum=130,centered=True)
-    face=font(48)
-    subtitle=content['cover'].get('subtitle','')
-    lines=wrap(draw,subtitle,face,WIDTH-144)
-    yy=max(440,end+24)
-    for line in lines:
-        if yy+65>680:raise ValueError('抖音封面副标题超出竖版可读区域')
-        draw.text((round((WIDTH-draw.textlength(line,font=face))/2),yy),line,font=face,fill=INK)
-        yy+=65
-    traces=content.get('image_traces',[])
-    label='图库配图' if traces and traces[0].get('ai_generated') is False else '场景配图'
-    draw.text((72,1640),label+' · 场景示意',font=font(24),fill=INK,stroke_width=1,stroke_fill=BACKGROUND)
-    image.save(path,'PNG')
+    from .cover_design import render_cover as shared_cover
+    return shared_cover(content, 'douyin', path, illustration, font=font, wrap=wrap)
 
 
 def render_page(content,index,path,illustration,*,font,wrap):
-    image=Image.new('RGB',(WIDTH,HEIGHT),BACKGROUND)
-    draw=ImageDraw.Draw(image)
-    card=content['cards'][index]
-    y=heading(draw,card['heading'],(72,112,WIDTH-144,270),font=font,wrap=wrap,maximum=86)+38
-    text='\n'.join(line for line in card['text'].splitlines() if line.strip())
-    for size in range(52,41,-2):
-        face=font(size)
-        lines=readable_lines(draw,text,face,WIDTH-144)
-        step=round(size*1.36)
-        if y+len(lines)*step<=805 and all(draw.textlength(line,font=face)<=WIDTH-144 for line in lines):break
-    else:raise ValueError('抖音正文超出竖版可读区域，请压缩本页正文')
-    for line in lines:
-        draw.text((72,y),line,font=face,fill=INK)
-        y+=step
-    photo_y=y+56
-    photo_height=1590-photo_y
-    if photo_height<520:raise ValueError('抖音卡片文字过密，配图区不足')
-    photo(image,illustration,(0,photo_y,WIDTH,photo_height))
-    draw=ImageDraw.Draw(image)
-    traces=content.get('image_traces',[])
-    label='图库配图' if index<len(traces) and traces[index].get('ai_generated') is False else '场景配图'
-    draw.text((72,1640),label+' · 根据来源内容整理',font=font(24),fill=MUTED)
-    image.save(path,'PNG')
+    from .editorial_pages import render_page as integrated_page
+    return integrated_page(content,index,path,illustration,'douyin',font=font,wrap=wrap)
 
 
 def render_cards(content,directory,illustrations,*,font,wrap):

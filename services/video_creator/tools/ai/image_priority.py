@@ -95,8 +95,8 @@ class PriorityImageTool:
         return config, private, account
 
     def generate(self, prompt, target, progress=lambda trace: None, *, aspect='16:9'):
-        if aspect not in {'16:9', '3:4', '9:16'}:
-            raise ValueError('发布配图仅支持16:9、3:4或9:16画幅')
+        if aspect not in {'16:9', '4:3', '3:4', '9:16'}:
+            raise ValueError('发布配图仅支持16:9、4:3、3:4或9:16画幅')
         target = Path(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         config, private, account = self.route_config()
@@ -169,6 +169,9 @@ class PriorityImageTool:
             raise ProviderError('豆包未返回可下载图片；未重新提交')
         report(message='正在保存豆包图片')
         save_image(outputs[0], target)
+        from .doubao_image_cleanup import prepare_publication_image
+        cleanup=prepare_publication_image(target)
+        report(image_cleanup=cleanup,message='豆包原图已保留，排版用图已裁除底部5%水印带')
 
     def local(self, prompt, target, report, *, aspect='16:9'):
         from services.core.understanding_queue import shared_slot
@@ -187,7 +190,7 @@ class PriorityImageTool:
             if model not in supported or model not in models:
                 raise ProviderError('本地未安装可用的 Flux / Qwen 生图模型，请检查 ComfyUI')
             seed = uuid.uuid4().int % 2**31
-            width, height = {'3:4': (896, 1216), '9:16': (768, 1344)}.get(aspect, (1344, 768))
+            width, height = {'4:3': (1152, 864), '3:4': (896, 1216), '9:16': (768, 1344)}.get(aspect, (1344, 768))
             graph = flux_image(prompt, '', width, height, 1, seed) if model == supported[0] else qwen_image(prompt, width, height, 1, seed)
             if model == supported[0]:
                 # Flux 1 uses 16-channel latents; EmptyFlux2LatentImage is for Flux 2.
