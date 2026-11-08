@@ -146,7 +146,7 @@ class OpenAICompatibleLLM:
             raise LLMError("LLM returned an empty prompt")
         return value
 
-    def complete_json(self, system: str, prompt: str) -> dict:
+    def complete_json(self, system: str, prompt: str, *, keep_alive: int | None = None) -> dict:
         """Run a structured planning/review turn and require a JSON object."""
         endpoint = self.base_url if self.base_url.endswith("/chat/completions") else self.base_url + "/chat/completions"
         if self.api_format == 'ollama':
@@ -175,6 +175,8 @@ class OpenAICompatibleLLM:
                            'messages': payload['messages']}
                 if self.use_model_sampling_defaults:
                     payload['options'].pop('temperature')
+                if keep_alive is not None:
+                    payload['keep_alive'] = keep_alive
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             headers = {"Content-Type": "application/json"}
             if self.api_key:

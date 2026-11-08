@@ -85,6 +85,18 @@ class VideoWebTests(unittest.TestCase):
             with self.assertRaises(ProviderError):self.provider().generate('dog',model=next(iter(MODELS)))
         self.assertEqual(post.call_count,1)
 
+    def test_assistant_quota_message_ends_polling_without_resubmitting(self):
+        message = {'user_type': 2, 'index_in_conv': '6', 'content_block': [
+            {'content': {'text_block': {'text': '今日视频生成免费额度已用完。开通订阅畅享更多额度。'}}},
+        ]}
+        result = {'downlink_body': {'pull_singe_chain_downlink_body': {'messages': [message]}}}
+        trace = {}
+        with patch('services.video_creator.tools.ai.doubao_web_video.requests.post', side_effect=self.responses(result)) as post:
+            with self.assertRaisesRegex(ProviderError, '免费额度已用完'):
+                self.provider().generate('dog', model=next(iter(MODELS)), diagnostics=trace)
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(trace['terminal_reason'], 'video_quota_exhausted')
+
     def test_i2v_binds_uploaded_reference_and_updates_all_message_ids(self):
         reference={'name':'reference.png','uri':'tos-cn-i-a9rns2rl98/new.png','width':512,'height':768,'format':'png'}
         before=copy.deepcopy(self.config)

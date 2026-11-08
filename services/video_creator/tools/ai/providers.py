@@ -19,6 +19,26 @@ class ProviderError(RuntimeError):
     pass
 
 
+def save_remote_asset(url: str, target: Path) -> None:
+    """Copy a short-lived provider output into persistent storage."""
+    import requests
+    if parse.urlsplit(url).scheme not in {"http", "https"}:
+        raise ValueError("媒体下载地址必须是 HTTP/HTTPS")
+    for attempt in range(2):
+        try:
+            with requests.get(url, headers={"User-Agent": "DouyinWorkspace/1.0", "Accept": "*/*"},
+                              timeout=(15, 180)) as response:
+                response.raise_for_status()
+                data = response.content
+            break
+        except requests.RequestException:
+            if attempt:
+                raise ProviderError("媒体下载失败；生成已提交，请先检查网络和远端结果") from None
+    if not data:
+        raise ValueError("云端返回了空的媒体内容")
+    target.write_bytes(data)
+
+
 class VideoProvider(ABC):
     @abstractmethod
     def submit(self, prompt: str, *, image: Path | None = None, video: Path | None = None, **params) -> str: ...

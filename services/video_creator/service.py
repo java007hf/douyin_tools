@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from services.video_creator.tools.ai.comfyui_client import ComfyUIClient, ComfyUIError
 from services.video_creator.tools.ai.config_store import ProviderConfigStore
 from services.video_creator.tools.ai.mock_doubao import MockDoubaoImageProvider, MODEL as MOCK_DOUBAO_MODEL, image_models, image_model_status, KNOWN_IMAGE_MODELS
-from services.video_creator.tools.ai.providers import MiniMaxImageProvider, MiniMaxVideoProvider, ProviderError, SeedreamImageProvider, SeedanceProvider
+from services.video_creator.tools.ai.providers import MiniMaxImageProvider, MiniMaxVideoProvider, ProviderError, SeedreamImageProvider, SeedanceProvider, save_remote_asset
 from services.video_creator.tools.ai.doubao_web_video import DoubaoWebVideoProvider, MODELS as DOUBAO_VIDEO_MODELS, OPTIONS as DOUBAO_VIDEO_OPTIONS, validate_video
 from services.video_creator.tools.ai.doubao_web import DoubaoWebImageProvider, OPTIONS as DOUBAO_WEB_OPTIONS
 from services.video_creator.tools.ai.generation_routes import image_generation_fields
@@ -19,6 +19,7 @@ from services.video_creator.tools.video.silence import ensure_non_dialogue_audio
 from services.video_creator.workflow.generation import bind_media, flux_image, qwen_image, video_workflow
 from services.video_creator.workflow.context import WorkflowContext
 from services.video_creator.workflows.ai_video import AIVideoWorkflow
+from services.video_creator.workflows.english_lesson import EnglishLessonWorkflow, read_profile, save_profile
 from services.video_creator.asset_library import ReferenceAssetStore
 from services.core.storage import service_store
 try: import oss2
@@ -90,21 +91,6 @@ def cloudinary_upload(config: dict, filename: str, data: bytes) -> str:
     if not secure_url: raise ValueError(result.get("error",{}).get("message","Cloudinary 上传失败"))
     return secure_url
 
-
-def save_remote_asset(url: str, target: Path) -> None:
-    """Copy short-lived cloud output URLs into the persistent local asset area."""
-    import requests
-    if parse.urlsplit(url).scheme not in {'http','https'}: raise ValueError('媒体下载地址必须是 HTTP/HTTPS')
-    for attempt in range(2):
-        try:
-            with requests.get(url,headers={"User-Agent":"DouyinWorkspace/1.0","Accept":"*/*"},timeout=(15,180)) as response:
-                response.raise_for_status()
-                data=response.content
-            break
-        except requests.RequestException:
-            if attempt: raise ProviderError('媒体下载失败；生成已提交，请先检查网络和远端结果') from None
-    if not data: raise ValueError("云端返回了空的图片内容")
-    target.write_bytes(data)
 
 def multipart_body(fields: dict[str, str], files: dict[str, Path]) -> tuple[bytes, str]:
     boundary = "----AIVideo" + uuid.uuid4().hex
@@ -184,6 +170,17 @@ def recover_comfy_jobs(server) -> None:
     except Exception:
         active=set()
     for job in server.jobs.list():
+        if job.get("kind") == "english_lesson" and job.get("status") in {"queued", "running"}:
+            if job.get("prompt_id") in active:
+                try:
+                    client.cancel(job["prompt_id"])
+                except ComfyUIError:
+                    pass
+            remote_started = (job.get("provider_response") or {}).get("conversation_id")
+            error = ("豆包可能仍在渲染，请凭会话 ID 查询原任务。未重复提交"
+                     if remote_started else "请从英语口播重新提交")
+            server.jobs.update(job["id"], status="error", message="服务重启，英语口播已中断", error=error)
+            continue
         if job.get("status") in {"queued","running"} and job.get("provider_id")=="mock_doubao":
             server.jobs.update(job["id"],status="error",message="服务重启，任务已中断",error="生成服务已重启；原请求可能已提交，请凭 provider_response 中的会话 ID 在豆包查询。未重复提交")
             continue
@@ -217,9 +214,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def send_json(self,status,payload):
         body=json.dumps(payload,ensure_ascii=False).encode(); self.send_response(status); self.send_header("content-type","application/json; charset=utf-8"); self.send_header("content-length",str(len(body))); self.end_headers(); self.wfile.write(body)
     def do_GET(self):
+        if parse.urlsplit(self.path).path == "/api/english-lesson/profile":
+            self.send_json(200, {"configured": read_profile(self.server.store_dir) is not None})
+            return
         path=parse.urlsplit(self.path).path
         if path in ("/","/index.html"):
-            body=HTML.replace("</body>",'<script src="/assets/frame_preview.js?v=2"></script><script src="/assets/generation.js?v=3"></script></body>').encode(); self.send_response(200); self.send_header("content-type","text/html; charset=utf-8"); self.send_header("content-length",str(len(body))); self.end_headers(); self.wfile.write(body); return
+            body=HTML.replace("</body>",'<script src="/assets/frame_preview.js?v=2"></script><script src="/assets/generation.js?v=4"></script></body>').encode(); self.send_response(200); self.send_header("content-type","text/html; charset=utf-8"); self.send_header("content-length",str(len(body))); self.end_headers(); self.wfile.write(body); return
         if path in ("/assets/frame_preview.js","/assets/generation.js"):
             body=Path(__file__).with_name(path.rsplit("/",1)[-1]).read_bytes(); self.send_response(200); self.send_header("content-type","text/javascript; charset=utf-8"); self.send_header("cache-control","no-store"); self.send_header("content-length",str(len(body))); self.end_headers(); self.wfile.write(body); return
         if path=="/health": self.send_json(200,{"ok":True,"service":"video-creator"}); return
@@ -434,6 +434,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except Exception as exc: self.send_json(400,{"error":str(exc)})
             return
         if path=="/api/generate-ai-video": self.handle_ai_video(); return
+        if path=="/api/english-lesson/profile": self.handle_english_lesson_profile(); return
+        if path=="/api/english-lesson": self.handle_english_lesson(); return
         if path in ("/api/generate-image","/api/generate-video"): self.handle_generation(path.rsplit("/",1)[-1].replace("generate-","")); return
         if path!="/api/extract-frames": self.send_json(404,{"error":"Not found"}); return
         try:
@@ -629,6 +631,64 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 except Exception as exc: self.server.jobs.update(job,status="error",message="AI 视频工作流失败",error=str(exc))
             threading.Thread(target=run,daemon=True).start(); self.send_json(202,{"ok":True,"jobId":job})
         except Exception as exc: self.send_json(400,{"error":str(exc)})
+    def handle_english_lesson_profile(self):
+        try:
+            if not 0 < int(self.headers.get("Content-Length", "0")) <= 28 * 1024 * 1024:
+                raise ValueError("请提交人像、声音样本和逐字稿，上传总大小不得超过 28 MB")
+            form = cgi.FieldStorage(fp=self.rfile, headers=self.headers,
+                                    environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": self.headers.get("content-type", "")})
+            portrait, audio = (form[key] if key in form else None for key in ("portrait", "audio"))
+            if not getattr(portrait, "filename", "") or not getattr(audio, "filename", ""):
+                raise ValueError("请同时上传参考人像和声音样本")
+            save_profile(self.server.store_dir, portrait.file, audio.file, str(form.getvalue("transcript") or ""))
+            self.send_json(200, {"configured": True})
+        except Exception as exc:
+            self.send_json(400, {"error": str(exc)})
+
+    def handle_english_lesson(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 8192:
+                raise ValueError("主题请求过长或为空")
+            payload = json.loads(self.rfile.read(length))
+            topic = str(payload.get("topic") or "").strip()
+            if not 0 < len(topic) <= 1000:
+                raise ValueError("请输入本期单词或语法（最多 1000 字）")
+            profile = read_profile(self.server.store_dir)
+            if profile is None:
+                raise ValueError("请先保存参考人像、声音样本及逐字稿")
+            config = self.server.providers.get_by_provider("ai_video_agent") or {}
+            if config.get("enabled") is False or not config.get("base_url") or not config.get("model"):
+                raise ValueError("请先在后台 AI视频 中配置讲稿使用的 Agent 模型")
+            doubao_config = self.server.store_dir / "mock_doubao.json"
+            if not doubao_config.is_file() or (self.server.providers.get_by_provider("mock_doubao") or {}).get("enabled") is False:
+                raise ValueError("请先配置并启用豆包 Mock 视频 Provider")
+            job = self.server.jobs.create()
+            root = self.server.store_dir / "generation_jobs" / job
+            root.mkdir(parents=True, exist_ok=True)
+            self.server.jobs.update(job, kind="english_lesson", provider_id="mock_doubao", prompt=topic,
+                                    profile_id=profile.name, reference_image="已保存的参考人像")
+            context = WorkflowContext(job, root, topic, reference_image=profile / "portrait.png")
+
+            def update(**fields):
+                self.server.jobs.update(job, **fields)
+
+            def run():
+                try:
+                    update(status="running", message="正在准备英语口播")
+                    output = EnglishLessonWorkflow(
+                        context, profile, config, doubao_config, update,
+                        lambda: job in self.server.cancelled_jobs,
+                    ).run()
+                    update(status="done", message="英语口播已生成", progress=100, outputs=[output])
+                except Exception as exc:
+                    update(status="error", message="英语口播生成失败", error=str(exc))
+
+            threading.Thread(target=run, daemon=True).start()
+            self.send_json(202, {"jobId": job})
+        except Exception as exc:
+            self.send_json(400, {"error": str(exc)})
+
     def handle_generation(self,kind):
         try:
             form=cgi.FieldStorage(fp=self.rfile,headers=self.headers,environ={"REQUEST_METHOD":"POST","CONTENT_TYPE":self.headers.get("content-type","")}); prompt=str(form.getvalue("prompt") or "").strip()

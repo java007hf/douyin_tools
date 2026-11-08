@@ -30,15 +30,30 @@
           await configure();
           await chrome.runtime.sendMessage({action:'event',payload:{stage:'bridge_ready',ok:true}});
           const candidates=()=>[...document.querySelectorAll('input[type="file"]')].filter(x=>!x.disabled&&/image|\.png|\.jpg|\.jpeg/i.test(x.accept));
-          const deadline=Date.now()+20000;
-          while(!candidates().length&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,200));
-          diagnostics.inputs=[...document.querySelectorAll('input[type="file"]')].map(x=>({accept:x.accept,multiple:x.multiple,disabled:x.disabled,visible:!!x.getClientRects().length}));
-          // Prefer image-only controls; for mixed attachment controls prefer the
-          // narrower accepted type set over a generic code/document uploader.
-          const specificity=input=>input.accept.split(',').filter(x=>!/^\s*(image\/|\.(png|jpe?g|webp|gif|bmp|avif|heic))/i.test(x)).length;
+          const acceptTypes=input=>input.accept.toLowerCase().split(',').map(type=>type.trim()).filter(Boolean);
+          const specificity=input=>acceptTypes(input).filter(type=>!/^image\/|^\.(png|jpe?g|webp|gif|bmp|avif|heic|apng)$/.test(type)).length;
           const priority=input=>specificity(input)*2+(input.multiple?0:1);
-          const inputs=candidates().sort((a,b)=>priority(a)-priority(b));
-          if(!inputs.length||(inputs.length>1&&priority(inputs[0])===priority(inputs[1])))throw Error('Cannot uniquely identify image upload input');
+          // The creation page also mounts hidden editor and chat uploaders.
+          // This image-only accept list is the reference control verified by a native upload.
+          const referenceAccept='.apng,.jpeg,.jpg,.png,.webp';
+          const selectInput=()=>{
+            const inputs=candidates();
+            const referenceInputs=inputs.filter(input=>!input.multiple&&acceptTypes(input).sort().join(',')===referenceAccept);
+            if(referenceInputs.length)return referenceInputs.length===1?referenceInputs[0]:null;
+            inputs.sort((a,b)=>priority(a)-priority(b));
+            return inputs.length>1&&priority(inputs[0])===priority(inputs[1])?null:inputs[0];
+          };
+          const deadline=Date.now()+20000;
+          const waitForInput=async()=>{
+            let input=selectInput();
+            while(!input&&Date.now()<deadline){
+              await new Promise(resolve=>setTimeout(resolve,200));
+              input=selectInput();
+            }
+            diagnostics.inputs=[...document.querySelectorAll('input[type="file"]')].map(x=>({accept:x.accept,multiple:x.multiple,disabled:x.disabled,visible:!!x.getClientRects().length}));
+            if(!input)throw Error('Cannot uniquely identify image upload input');
+            return input;
+          };
           const image=message.image;
           let cleared=0;
           if(image.reset_before_upload){
@@ -54,8 +69,7 @@
               cleared++;
             }
           }
-          const input=candidates().sort((a,b)=>priority(a)-priority(b))[0];
-          if(!input)throw Error('Cannot uniquely identify image upload input');
+          const input=await waitForInput();
           const bytes=Uint8Array.from(atob(image.data),c=>c.charCodeAt(0));
           const transfer=new DataTransfer();transfer.items.add(new File([bytes],'doubao-bridge-'+crypto.randomUUID()+'-'+image.name,{type:image.mime}));
           input.value='';

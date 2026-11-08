@@ -3,15 +3,17 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');const path=require('node:path');const vm=require('node:vm');
 const {webcrypto}=require('node:crypto');
 
-test('image creation reference uploader is distinguished from single-image editor by multiple',async()=>{
+test('verified reference uploader wins over the hidden editors and chat uploaders from the live page',async()=>{
   const listeners=[];const reports=[];let command;let complete;
   const done=new Promise(resolve=>complete=resolve);
   const window={addEventListener:(name,fn)=>listeners.push(fn),removeEventListener:(name,fn)=>{const i=listeners.indexOf(fn);if(i>=0)listeners.splice(i,1)}};
   window.postMessage=value=>{
     if(value.source==='doubao-bridge-config-v3')queueMicrotask(()=>listeners.slice().forEach(fn=>fn({source:window,origin:'https://www.doubao.com',data:{source:'doubao-bridge-configured',id:value.id}})));
   };
-  const single={accept:'.jpg,.png,.jpeg,.webp,.apng,',multiple:false,disabled:false,getClientRects:()=>[],dispatchEvent:()=>assert.fail('single-image editor must not be selected')};
-  const multi={...single,multiple:true,dispatchEvent:()=>reports.push('multi-selected')};
+  const reference={accept:'.jpg,.png,.jpeg,.webp,.apng,',multiple:false,disabled:false,getClientRects:()=>[],dispatchEvent:()=>reports.push('reference-dispatched')};
+  const editor={...reference,multiple:true,dispatchEvent:()=>assert.fail('image editor must not be selected')};
+  const chat={...editor,multiple:false,accept:'.jpg,.jpeg,.png,.webp,.gif,image/jpeg,image/png,image/webp,image/gif'};
+  const alternate={...chat,accept:'.jpg,.png,.jpeg,.webp'};
   class DataTransfer{constructor(){this.files=[];this.items={add:file=>this.files.push(file)}}}
   class File{constructor(parts,name,options){this.name=name}}
   const chrome={runtime:{onMessage:{addListener:fn=>command=fn,removeListener(){}},sendMessage:async value=>{
@@ -19,13 +21,13 @@ test('image creation reference uploader is distinguished from single-image edito
     return {ok:true};
   }}};
   vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../chrome_extension/content.js'),'utf8'),{
-    window,document:{querySelectorAll:()=>[single,multi]},chrome,location:{origin:'https://www.doubao.com'},
+    window,document:{querySelectorAll:()=>[editor,reference,chat,{...editor},alternate]},chrome,location:{origin:'https://www.doubao.com'},
     crypto:webcrypto,Uint8Array,DataTransfer,File,atob,Event,setTimeout,clearTimeout,setInterval:()=>1,clearInterval(){}
   });
   command({action:'select_reference',image:{data:'aGVsbG8=',name:'reference.png',mime:'image/png'}},{},()=>{});
   await done;
-  assert.match(multi.files[0].name,/^doubao-bridge-.*-reference\.png$/);
-  assert.deepEqual(reports,['bridge_ready','multi-selected','reference_selected']);
+  assert.match(reference.files[0].name,/^doubao-bridge-.*-reference\.png$/);
+  assert.deepEqual(reports,['bridge_ready','reference-dispatched','reference_selected']);
 });
 
 test('new batch clears only bridge-owned draft attachments before choosing the image',async()=>{

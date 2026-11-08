@@ -192,6 +192,9 @@ class DoubaoWebVideoProvider:
                     if urls: return urls
                     latest=latest_assistant(value)
                     texts=[o.get('text','') for o in objects(latest or value) if isinstance(o.get('text'),str)]
+                    if latest and any('今日视频生成免费额度已用完' in line for line in texts):
+                        trace['terminal_reason']='video_quota_exhausted'
+                        raise ProviderError('豆包今日视频生成免费额度已用完')
                     if any('确认后' in text or '请先确认' in text for text in texts):
                         trace['awaiting_confirmation']=True
                         if not latest:raise ProviderError('豆包要求确认，但未取得可验证的消息游标；未自动确认')
