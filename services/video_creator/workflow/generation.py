@@ -35,8 +35,15 @@ def load_full_h3_template(kind: str, payload: dict) -> dict | None:
     template_kind = "r2v" if kind == "reference_pack_i2v" else kind
     env_name = {"t2v": "COMFYUI_T2V_API_WORKFLOW", "i2v": "COMFYUI_I2V_API_WORKFLOW", "r2v": "COMFYUI_R2V_API_WORKFLOW"}.get(template_kind)
     configured = os.getenv(env_name) if env_name else None
-    default = Path(__file__).resolve().parents[1] / "workflows" / "h3_t2v_api.json" if template_kind in {"t2v", "i2v"} else Path(os.getenv("COMFYUI_WORKFLOW_DIR", r"C:\workspace\ComfyUI\user\default\workflows")) / "video_minimax_h3_r2v.json"
-    path = Path(configured) if configured else default
+    creator_dir = Path(__file__).resolve().parents[1]
+    if configured:
+        path = Path(configured)
+    elif template_kind in {"t2v", "i2v"}:
+        path = creator_dir / "workflows" / "h3_t2v_api.json"
+    else:
+        sibling_workflows = creator_dir.parents[2] / "ComfyUI" / "user" / "default" / "workflows"
+        workflow_dir = Path(os.getenv("COMFYUI_WORKFLOW_DIR", str(sibling_workflows)))
+        path = workflow_dir / "video_minimax_h3_r2v.json"
     if not path or not path.is_file():
         return None
     source = json.loads(path.read_text(encoding="utf-8"))
